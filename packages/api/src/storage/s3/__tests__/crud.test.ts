@@ -1299,7 +1299,7 @@ describe('S3 CRUD', () => {
         contentType: 'application/pdf',
       });
 
-      expect(result).toContain('signed=true');
+      expect(result.url).toContain('signed=true');
       expect(getSignedUrl).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
@@ -1311,6 +1311,50 @@ describe('S3 CRUD', () => {
         }),
         expect.anything(),
       );
+    });
+
+    it('signs a GetObject for the exact bucket and key with the default expiry', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-23T10:00:00.000Z') });
+      try {
+        const { getS3DownloadURL } = await import('../crud');
+        const result = await getS3DownloadURL({
+          file: { filepath: 'https://bucket.s3.amazonaws.com/uploads/user123/a.pdf' } as TFile,
+        });
+
+        const [, command, options] = (getSignedUrl as jest.Mock).mock.calls[0];
+        expect(command).toBeInstanceOf(GetObjectCommand);
+        expect(command.input).toEqual(
+          expect.objectContaining({ Bucket: 'test-bucket', Key: 'uploads/user123/a.pdf' }),
+        );
+        expect(options).toEqual({ expiresIn: 120 });
+        expect(result.expiresAt.toISOString()).toBe('2026-10-23T10:02:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('honors a caller-provided expiresIn', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-23T10:00:00.000Z') });
+      try {
+        const { getS3DownloadURL } = await import('../crud');
+        const result = await getS3DownloadURL({
+          file: { filepath: 'https://bucket.s3.amazonaws.com/uploads/user123/a.pdf' } as TFile,
+          expiresIn: 900,
+        });
+
+        expect(getSignedUrl).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
+          expiresIn: 900,
+        });
+        expect(result.expiresAt.toISOString()).toBe('2026-10-23T10:15:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('throws without signing when the file has no resolvable key', async () => {
+      const { getS3DownloadURL } = await import('../crud');
+      await expect(getS3DownloadURL({ file: { filepath: '' } as TFile })).rejects.toThrow();
+      expect(getSignedUrl).not.toHaveBeenCalled();
     });
 
     it('prefers storageKey when present', async () => {

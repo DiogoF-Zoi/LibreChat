@@ -1509,6 +1509,10 @@ endpoints:
 #       fileSizeLimit: 5
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
+#   # Lifetime in seconds of S3 presigned URLs for authenticated file downloads (max: 604800 / 7 days).
+#   # Defaults to 300. Other S3 URLs (images, avatars) keep using S3_URL_EXPIRY_SECONDS (120).
+#   # CloudFront download URLs use `cloudfront.urlExpiry` instead.
+#   downloadUrlExpiry: 300
 #   imageGeneration: # Image Gen settings, either percentage or px
 #     percentage: 100
 #     px: 1024

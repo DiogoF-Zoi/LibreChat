@@ -10,6 +10,7 @@ import type {
   SaveURLParams,
   UploadFileParams,
   DownloadURLParams,
+  DownloadURLResult,
   SaveURLResult,
   UploadResult,
 } from '~/storage/types';
@@ -108,6 +109,10 @@ function buildCloudFrontUrl(s3Key: string): string {
 }
 
 function signUrl(url: string | URL): string {
+  return signUrlWithExpiry(url).url;
+}
+
+function signUrlWithExpiry(url: string | URL): DownloadURLResult {
   const config = getCloudFrontConfig();
   if (!config?.privateKey || !config?.keyPairId) {
     throw new Error('[signUrl] Signing keys not configured.');
@@ -116,6 +121,7 @@ function signUrl(url: string | URL): string {
   const expiry = config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
   const expiresAtMs = Date.now() + expiry * 1000;
   const expiresAtEpoch = Math.floor(expiresAtMs / 1000);
+  const expiresAt = new Date(expiresAtMs);
 
   const urlString = url.toString();
   const parsedUrl = url instanceof URL ? url : new URL(urlString);
@@ -133,20 +139,26 @@ function signUrl(url: string | URL): string {
       ],
     });
 
-    return getSignedUrl({
+    return {
+      url: getSignedUrl({
+        url: urlString,
+        keyPairId: config.keyPairId,
+        privateKey: config.privateKey,
+        policy,
+      }),
+      expiresAt,
+    };
+  }
+
+  return {
+    url: getSignedUrl({
       url: urlString,
       keyPairId: config.keyPairId,
       privateKey: config.privateKey,
-      policy,
-    });
-  }
-
-  return getSignedUrl({
-    url: urlString,
-    keyPairId: config.keyPairId,
-    privateKey: config.privateKey,
-    dateLessThan: new Date(expiresAtMs).toISOString(),
-  });
+      dateLessThan: expiresAt.toISOString(),
+    }),
+    expiresAt,
+  };
 }
 
 function appendDownloadOverrides(
@@ -348,11 +360,11 @@ export async function getCloudFrontDownloadURL({
   file,
   customFilename = null,
   contentType = null,
-}: DownloadURLParams): Promise<string> {
+}: DownloadURLParams): Promise<DownloadURLResult> {
   const key = resolveStoredS3Key(file);
   if (!key) {
     throw new Error('[getCloudFrontDownloadURL] Unable to extract S3 key from file path');
   }
   const url = appendDownloadOverrides(buildCloudFrontUrl(key), customFilename, contentType);
-  return signUrl(url);
+  return signUrlWithExpiry(url);
 }

@@ -23,6 +23,7 @@ import type {
   UploadFileParams,
   SaveBufferParams,
   DownloadURLParams,
+  DownloadURLResult,
   SaveURLResult,
   BatchUpdateFn,
   SaveURLParams,
@@ -292,10 +293,12 @@ async function getS3URLForKey({
   key,
   customFilename = null,
   contentType = null,
+  expiresIn = s3UrlExpirySeconds,
 }: {
   key: string;
   customFilename?: string | null;
   contentType?: string | null;
+  expiresIn?: number;
 }): Promise<string> {
   const params: GetObjectCommandInput = { Bucket: bucketName, Key: key };
 
@@ -313,7 +316,7 @@ async function getS3URLForKey({
       throw new Error('[getS3URL] S3 not initialized');
     }
 
-    return await getSignedUrl(s3, new GetObjectCommand(params), { expiresIn: s3UrlExpirySeconds });
+    return await getSignedUrl(s3, new GetObjectCommand(params), { expiresIn });
   } catch (error) {
     logger.error('[getS3URL] Error getting signed URL from S3:', (error as Error).message);
     throw error;
@@ -903,12 +906,15 @@ export async function getS3DownloadURL({
   file,
   customFilename = null,
   contentType = null,
-}: DownloadURLParams): Promise<string> {
+  expiresIn = s3UrlExpirySeconds,
+}: DownloadURLParams): Promise<DownloadURLResult> {
   const key = resolveStoredS3Key(file);
   if (!key) {
     throw new Error('[getS3DownloadURL] Unable to extract S3 key from file path');
   }
-  return getS3URLForKey({ key, customFilename, contentType });
+  const signedAt = Date.now();
+  const url = await getS3URLForKey({ key, customFilename, contentType, expiresIn });
+  return { url, expiresAt: new Date(signedAt + expiresIn * 1000) };
 }
 
 export function needsRefresh(signedUrl: string, bufferSeconds: number): boolean {

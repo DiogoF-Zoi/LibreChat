@@ -675,6 +675,8 @@ export const fileConfigSchema = z.object({
   fileContextCharLimit: z.number().min(0).optional(),
   codeEnvLivenessSafeWindowMs: z.number().min(0).optional(),
   legacySearchProbeTimeoutMs: z.number().min(1).optional(),
+  /** S3 presigned download URL lifetime in seconds; capped at SigV4's 7-day maximum. */
+  downloadUrlExpiry: z.number().int().positive().max(604800).optional(),
   imageGeneration: z
     .object({
       percentage: z.number().min(0).max(100).optional(),
