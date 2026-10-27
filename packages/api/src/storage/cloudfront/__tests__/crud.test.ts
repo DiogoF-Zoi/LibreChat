@@ -865,7 +865,8 @@ describe('CloudFront CRUD', () => {
         } as TFile,
       });
 
-      expect(result).toContain('Policy=abc');
+      expect(result.url).toContain('Policy=abc');
+      expect(result.expiresAt).toBeInstanceOf(Date);
       expect(mockResolveStoredS3Key).toHaveBeenCalledWith(
         expect.objectContaining({
           filepath: 'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
@@ -894,7 +895,7 @@ describe('CloudFront CRUD', () => {
         contentType: 'application/pdf',
       });
 
-      expect(result).toBe('signed-url');
+      expect(result.url).toBe('signed-url');
       const signedInputUrl = new URL((mockGetSignedUrl.mock.calls[0][0] as { url: string }).url);
       expect(signedInputUrl.searchParams.get('response-content-disposition')).toBe(
         'attachment; filename="reportbad.pdf"',
@@ -919,8 +920,8 @@ describe('CloudFront CRUD', () => {
       expect(policy.Statement[0].Resource).toBe(
         'https://d123.cloudfront.net/uploads/user1/report.pdf?*',
       );
-      expect(policy.Statement[0].Condition.DateLessThan['AWS:EpochTime']).toEqual(
-        expect.any(Number),
+      expect(policy.Statement[0].Condition.DateLessThan['AWS:EpochTime']).toBe(
+        Math.floor(result.expiresAt.getTime() / 1000),
       );
     });
 

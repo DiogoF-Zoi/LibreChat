@@ -284,7 +284,7 @@ const streamSharedFile = async (req, res, file, requestedDisposition) => {
   const isDirectSource = source === FileSources.s3 || source === FileSources.cloudfront;
   if (req.query.direct === 'true' && getDownloadURL && isDirectSource) {
     try {
-      const url = await getDownloadURL({
+      const { url } = await getDownloadURL({
         req,
         file,
         customFilename: cleanFileName(file.filename),
