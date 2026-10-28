@@ -11,6 +11,8 @@
  *
  * The URL is always fetched without credentials, as an external consumer would.
  */
+import { Readable } from 'stream';
+import { createHash, randomBytes } from 'crypto';
 import { PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import type { TFile } from 'librechat-data-provider';
 import type { S3Client } from '@aws-sdk/client-s3';
@@ -31,10 +33,10 @@ describe('S3 presigned download URL (integration)', () => {
   let getS3DownloadURL: typeof import('../crud').getS3DownloadURL;
   const keys: string[] = [];
 
-  const putObject = async (key: string, contentType = 'text/plain') => {
+  const putObject = async (key: string, contentType = 'text/plain', body: Buffer = BODY) => {
     keys.push(key);
     await s3.send(
-      new PutObjectCommand({ Bucket: TEST_BUCKET, Key: key, Body: BODY, ContentType: contentType }),
+      new PutObjectCommand({ Bucket: TEST_BUCKET, Key: key, Body: body, ContentType: contentType }),
     );
     return { storageKey: key, filepath: '', filename: key } as TFile;
   };
@@ -67,6 +69,30 @@ describe('S3 presigned download URL (integration)', () => {
     expect(res.status).toBe(200);
     expect(Buffer.from(await res.arrayBuffer()).equals(BODY)).toBe(true);
   });
+
+  it('streams a large file with a matching SHA-256 checksum', async () => {
+    const chunks = Array.from({ length: 50 }, () => randomBytes(1024 * 1024));
+    const large = Buffer.concat(chunks);
+    const expected = createHash('sha256').update(large).digest('hex');
+    const file = await putObject(
+      `${RUN_ID}/uploads/user1/large.bin`,
+      'application/octet-stream',
+      large,
+    );
+    const { url } = await getS3DownloadURL({ file });
+
+    const res = await fetch(url);
+    const hash = createHash('sha256');
+    let size = 0;
+    for await (const chunk of Readable.fromWeb(res.body as never)) {
+      hash.update(chunk as Buffer);
+      size += (chunk as Buffer).length;
+    }
+
+    expect(res.status).toBe(200);
+    expect(size).toBe(large.length);
+    expect(hash.digest('hex')).toBe(expected);
+  }, 120_000);
 
   it('serves keys containing spaces, plus signs and unicode', async () => {
     const file = await putObject(`${RUN_ID}/uploads/user1/relatório (1)+final 日本語.txt`);
