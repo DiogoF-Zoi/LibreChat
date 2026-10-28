@@ -112,13 +112,13 @@ function signUrl(url: string | URL): string {
   return signUrlWithExpiry(url).url;
 }
 
-function signUrlWithExpiry(url: string | URL): DownloadURLResult {
+function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLResult {
   const config = getCloudFrontConfig();
   if (!config?.privateKey || !config?.keyPairId) {
     throw new Error('[signUrl] Signing keys not configured.');
   }
 
-  const expiry = config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
+  const expiry = expiresIn ?? config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
   const expiresAtMs = Date.now() + expiry * 1000;
   const expiresAtEpoch = Math.floor(expiresAtMs / 1000);
   const expiresAt = new Date(expiresAtMs);
@@ -360,11 +360,12 @@ export async function getCloudFrontDownloadURL({
   file,
   customFilename = null,
   contentType = null,
+  expiresIn,
 }: DownloadURLParams): Promise<DownloadURLResult> {
   const key = resolveStoredS3Key(file);
   if (!key) {
     throw new Error('[getCloudFrontDownloadURL] Unable to extract S3 key from file path');
   }
   const url = appendDownloadOverrides(buildCloudFrontUrl(key), customFilename, contentType);
-  return signUrlWithExpiry(url);
+  return signUrlWithExpiry(url, expiresIn);
 }

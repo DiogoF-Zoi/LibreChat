@@ -925,6 +925,45 @@ describe('CloudFront CRUD', () => {
       );
     });
 
+    it('uses the requested expiresIn instead of cloudfront.urlExpiry', async () => {
+      mockGetCloudFrontConfig.mockReturnValue(
+        makeConfig({ privateKey: 'pk', keyPairId: 'K1', urlExpiry: 7200 }),
+      );
+      mockResolveStoredS3Key.mockReturnValue('uploads/user1/doc.pdf');
+      mockGetSignedUrl.mockReturnValue('signed-url');
+
+      const { getCloudFrontDownloadURL } = await import('~/storage/cloudfront/crud');
+      const before = Date.now();
+      const result = await getCloudFrontDownloadURL({
+        file: { filepath: 'https://d123.cloudfront.net/uploads/user1/doc.pdf' } as TFile,
+        expiresIn: 300,
+      });
+
+      const lifetimeMs = result.expiresAt.getTime() - before;
+      expect(lifetimeMs).toBeGreaterThanOrEqual(300_000);
+      expect(lifetimeMs).toBeLessThan(310_000);
+      const input = mockGetSignedUrl.mock.calls[0][0] as { dateLessThan: string };
+      expect(new Date(input.dateLessThan).getTime()).toBe(result.expiresAt.getTime());
+    });
+
+    it('falls back to cloudfront.urlExpiry when no expiresIn is requested', async () => {
+      mockGetCloudFrontConfig.mockReturnValue(
+        makeConfig({ privateKey: 'pk', keyPairId: 'K1', urlExpiry: 7200 }),
+      );
+      mockResolveStoredS3Key.mockReturnValue('uploads/user1/doc.pdf');
+      mockGetSignedUrl.mockReturnValue('signed-url');
+
+      const { getCloudFrontDownloadURL } = await import('~/storage/cloudfront/crud');
+      const before = Date.now();
+      const result = await getCloudFrontDownloadURL({
+        file: { filepath: 'https://d123.cloudfront.net/uploads/user1/doc.pdf' } as TFile,
+      });
+
+      const lifetimeMs = result.expiresAt.getTime() - before;
+      expect(lifetimeMs).toBeGreaterThanOrEqual(7_200_000);
+      expect(lifetimeMs).toBeLessThan(7_210_000);
+    });
+
     it('throws when signing keys are missing', async () => {
       mockGetCloudFrontConfig.mockReturnValue(makeConfig({ privateKey: null, keyPairId: null }));
       mockResolveStoredS3Key.mockReturnValue('uploads/user1/doc.pdf');

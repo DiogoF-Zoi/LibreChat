@@ -1795,6 +1795,20 @@ describe('fileConfigSchema clientImageResize', () => {
   });
 });
 
+describe('fileConfigSchema downloadUrlExpiry', () => {
+  it.each([1, 300, 3600])('accepts %d seconds', (seconds) => {
+    expect(fileConfigSchema.safeParse({ downloadUrlExpiry: seconds }).success).toBe(true);
+  });
+
+  it.each([0, -1, 1.5, 3601, 604800])('rejects %d seconds', (seconds) => {
+    expect(fileConfigSchema.safeParse({ downloadUrlExpiry: seconds }).success).toBe(false);
+  });
+
+  it('is optional', () => {
+    expect(fileConfigSchema.safeParse({}).success).toBe(true);
+  });
+});
+
 describe('defaultLLMDeliveryPath config merging', () => {
   it('should include defaultLLMDeliveryPath and legacyFileUploadUX in merged endpoint config', () => {
     const merged = mergeFileConfig({
