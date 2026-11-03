@@ -16,9 +16,12 @@ const files = require('./files');
 const images = require('./images');
 const avatar = require('./avatar');
 const speech = require('./speech');
+const signed = require('./signed');
 
 const initialize = async () => {
   const router = express.Router();
+  /** Signed download URLs carry their own authorization, so they are served before JWT auth. */
+  router.use('/signed', signed);
   router.use(requireJwtAuth);
   router.use(configMiddleware);
   router.use(checkBan);

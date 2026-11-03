@@ -86,6 +86,19 @@ describe('resolveFileDownloadURL', () => {
     },
   );
 
+  it('returns unsupported_source for text files, which have no stored bytes to sign', async () => {
+    const { getDownloadURL, getStrategyFunctions } = createStrategy();
+
+    const result = await resolveFileDownloadURL({
+      file: { ...s3File, source: FileSources.text },
+      filename: 'doc.txt',
+      getStrategyFunctions,
+    });
+
+    expect(result).toEqual({ ok: false, error: { code: 'unsupported_source' } });
+    expect(getDownloadURL).not.toHaveBeenCalled();
+  });
+
   it('returns missing_model for OpenAI-stored files without a model', async () => {
     const { getStrategyFunctions } = createStrategy();
 

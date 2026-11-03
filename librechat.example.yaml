@@ -1545,8 +1545,9 @@ endpoints:
 #       fileSizeLimit: 5
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
-#   # Lifetime in seconds of signed URLs for authenticated file downloads, S3 and CloudFront (max: 3600 / 1 hour).
-#   # Defaults to 300. Other S3 URLs (images, avatars) keep using S3_URL_EXPIRY_SECONDS (120)
+#   # Lifetime in seconds of signed URLs for authenticated file downloads: S3, CloudFront and local storage
+#   # (max: 3600 / 1 hour). Defaults to 300. Local storage URLs point at DOMAIN_SERVER and are signed with
+#   # JWT_SECRET. Other S3 URLs (images, avatars) keep using S3_URL_EXPIRY_SECONDS (120)
 #   # and CloudFront asset URLs keep using `cloudfront.urlExpiry`.
 #   downloadUrlExpiry: 300
 #   imageGeneration: # Image Gen settings, either percentage or px

@@ -40,6 +40,10 @@ export async function resolveFileDownloadURL({
   if (checkOpenAIStorage(source)) {
     return { ok: false, error: { code: file.model ? 'unsupported_source' : 'missing_model' } };
   }
+  /** Text files resolve to the local strategy but keep their content in the database, not on disk. */
+  if (source === FileSources.text) {
+    return { ok: false, error: { code: 'unsupported_source' } };
+  }
 
   const { getDownloadURL } = getStrategyFunctions(source);
   if (!getDownloadURL) {

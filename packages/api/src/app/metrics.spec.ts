@@ -36,6 +36,7 @@ describe('normalizePath', () => {
     ['/api/files/507f1f77bcf86cd799439011/preview', '/api/files/#id/preview'],
     ['/api/files/download/user-123/file-456', '/api/files/download/#id/#id'],
     ['/api/files/download-url/user-123/file-456', '/api/files/download-url/#id/#id'],
+    ['/api/files/signed/507f1f77bcf86cd799439011?signature=abc', '/api/files/signed/#id'],
     ['/api/files/code/download/session-123/file-456', '/api/files/code/download/#id/#id'],
     ['/api/agents/507f1f77bcf86cd799439011', '/api/agents/#id'],
     ['/api/agents/chat/stream/stream-123', '/api/agents/chat/stream/#id'],
