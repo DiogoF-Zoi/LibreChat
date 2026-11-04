@@ -148,24 +148,114 @@ describe('S3 presigned download URLs (real presigner, fake credentials)', () => 
     const parsed = new URL(url);
 
     expect(parsed.searchParams.get('response-content-disposition')).toBe(
-      'attachment; filename="page.html"',
+      `attachment; filename="page.html"; filename*=UTF-8''page.html`,
     );
     expect(parsed.searchParams.get('response-content-type')).toBe('text/html');
   });
 
-  it('reports an expiresAt that agrees with the signed X-Amz-Date + X-Amz-Expires', async () => {
-    const { getS3DownloadURL } = crud;
-    const { url, expiresAt } = await getS3DownloadURL({
-      file: fileFor('uploads/user1/a.txt'),
-      expiresIn: 900,
-    });
-    const parsed = new URL(url);
-    const signedExpiry =
-      parseAmzDate(parsed.searchParams.get('X-Amz-Date') as string) +
-      Number(parsed.searchParams.get('X-Amz-Expires')) * 1000;
+  it.each([undefined, null, ''])(
+    'still signs an attachment disposition when the filename is %p',
+    async (customFilename) => {
+      const { getS3DownloadURL } = crud;
+      const { url } = await getS3DownloadURL({
+        file: fileFor('uploads/user1/page.html'),
+        customFilename,
+        contentType: 'text/html',
+      });
+      const parsed = new URL(url);
 
-    expect(parsed.searchParams.get('X-Amz-Expires')).toBe('900');
-    expect(Math.abs(expiresAt.getTime() - signedExpiry)).toBeLessThanOrEqual(2000);
+      expect(parsed.searchParams.get('response-content-disposition')).toBe(
+        `attachment; filename="download"; filename*=UTF-8''download`,
+      );
+      expect(computeSignature(parsed, SECRET_KEY)).toBe(parsed.searchParams.get('X-Amz-Signature'));
+    },
+  );
+
+  it('signs a non-ASCII filename as an ASCII-only RFC 5987 disposition', async () => {
+    const { getS3DownloadURL } = crud;
+    const { url } = await getS3DownloadURL({
+      file: fileFor('uploads/user1/r.xlsx'),
+      customFilename: 'relatório; "final".xlsx',
+    });
+    const disposition = new URL(url).searchParams.get('response-content-disposition') as string;
+
+    expect(disposition).toMatch(/^[\x20-\x7e]+$/);
+    expect(disposition).toBe(
+      `attachment; filename="relato_rio; _final_.xlsx"; filename*=UTF-8''relat%C3%B3rio%3B%20%22final%22.xlsx`,
+    );
+  });
+
+  it('never reports an expiresAt later than the signed X-Amz-Date + X-Amz-Expires', async () => {
+    const { getS3DownloadURL } = crud;
+    /** Just before a second boundary, where an unfloored signing time would overstate by ~1s. */
+    const signingTime = Math.floor(Date.now() / 1000) * 1000 + 999;
+    jest.spyOn(Date, 'now').mockReturnValue(signingTime);
+    try {
+      const { url, expiresAt } = await getS3DownloadURL({
+        file: fileFor('uploads/user1/a.txt'),
+        expiresIn: 900,
+      });
+      const parsed = new URL(url);
+      const signedExpiry =
+        parseAmzDate(parsed.searchParams.get('X-Amz-Date') as string) +
+        Number(parsed.searchParams.get('X-Amz-Expires')) * 1000;
+
+      expect(parsed.searchParams.get('X-Amz-Expires')).toBe('900');
+      expect(expiresAt.getTime()).toBeLessThanOrEqual(signedExpiry);
+      expect(signedExpiry - expiresAt.getTime()).toBeLessThan(1000);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
+  it('reports the credential expiry when temporary credentials expire first', async () => {
+    const { getS3DownloadURL } = crud;
+    const { initializeS3 } = await import('~/cdn/s3');
+    const client = initializeS3()!;
+    const staticCredentials = client.config.credentials;
+    const expiration = new Date(Date.now() + 120_000);
+    client.config.credentials = async () => ({
+      accessKeyId: ACCESS_KEY,
+      secretAccessKey: SECRET_KEY,
+      sessionToken: 'session-token',
+      expiration,
+    });
+    try {
+      const { url, expiresAt } = await getS3DownloadURL({
+        file: fileFor('uploads/user1/a.txt'),
+        expiresIn: 900,
+      });
+
+      expect(new URL(url).searchParams.get('X-Amz-Security-Token')).toBe('session-token');
+      expect(expiresAt).toEqual(expiration);
+    } finally {
+      client.config.credentials = staticCredentials;
+    }
+  });
+
+  it('keeps the requested expiry when temporary credentials outlive it', async () => {
+    const { getS3DownloadURL } = crud;
+    const { initializeS3 } = await import('~/cdn/s3');
+    const client = initializeS3()!;
+    const staticCredentials = client.config.credentials;
+    client.config.credentials = async () => ({
+      accessKeyId: ACCESS_KEY,
+      secretAccessKey: SECRET_KEY,
+      sessionToken: 'session-token',
+      expiration: new Date(Date.now() + 3_600_000),
+    });
+    try {
+      const before = Date.now();
+      const { expiresAt } = await getS3DownloadURL({
+        file: fileFor('uploads/user1/a.txt'),
+        expiresIn: 300,
+      });
+
+      expect(expiresAt.getTime() - before).toBeLessThanOrEqual(300_000);
+      expect(expiresAt.getTime() - before).toBeGreaterThan(298_000);
+    } finally {
+      client.config.credentials = staticCredentials;
+    }
   });
 
   it.each([

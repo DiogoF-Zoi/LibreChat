@@ -1,7 +1,7 @@
 import path from 'path';
 import crypto from 'node:crypto';
 import { EModelEndpoint } from 'librechat-data-provider';
-import { mkdir, copyFile, rename, unlink, writeFile } from 'fs/promises';
+import { stat, mkdir, rename, unlink, realpath, copyFile, writeFile } from 'fs/promises';
 import type { TFileConfig } from 'librechat-data-provider';
 import type { AppConfig } from '@librechat/data-schemas';
 import { stripCacheBust } from './path';
@@ -96,6 +96,87 @@ export function createLocalFileDeleter({ deleteRagFile, logger }: LocalFileDelet
 function isStrictlyWithin(directory: string, filePath: string): boolean {
   const rel = path.relative(path.resolve(directory), path.resolve(filePath));
   return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(`..${path.sep}`);
+}
+
+/** The storage roots a local download may be served from. */
+export interface LocalDownloadRoots {
+  uploads: string;
+  imageOutput: string;
+}
+
+export type LocalDownloadPathErrorCode = 'not_found' | 'outside_storage';
+
+export interface LocalDownloadFile {
+  /** Absolute path with symlinks resolved. */
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export type LocalDownloadPathResult =
+  | { ok: true; value: LocalDownloadFile }
+  | { ok: false; error: { code: LocalDownloadPathErrorCode } };
+
+/** URL prefixes local storage writes into `filepath` (`saveLocalBuffer`, `uploadLocalFile`). */
+const LOCAL_DOWNLOAD_PREFIXES: [string, keyof LocalDownloadRoots][] = [
+  ['/uploads/', 'uploads'],
+  ['/images/', 'imageOutput'],
+];
+
+const outsideStorage: LocalDownloadPathResult = {
+  ok: false,
+  error: { code: 'outside_storage' },
+};
+const notFound: LocalDownloadPathResult = { ok: false, error: { code: 'not_found' } };
+
+const isMissing = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+};
+
+/**
+ * Resolves a local record's `filepath` to the real file it names, for a caller that holds no
+ * session. Only paths under the uploads and image roots are servable. Containment is checked on
+ * the lexical path and again after symlinks resolve, so a link inside a root cannot reach a file
+ * outside it. A directory or a missing file is `not_found`.
+ */
+export async function resolveLocalDownloadPath(
+  filepath: string,
+  roots: LocalDownloadRoots,
+): Promise<LocalDownloadPathResult> {
+  const cleanFilepath = stripCacheBust(filepath);
+  const match = LOCAL_DOWNLOAD_PREFIXES.find(([prefix]) => cleanFilepath.startsWith(prefix));
+  if (!match) {
+    return outsideStorage;
+  }
+  const [prefix, rootKey] = match;
+  const root = roots[rootKey];
+  const relative = cleanFilepath.slice(prefix.length);
+  if (!root || !relative || relative.includes('\0')) {
+    return outsideStorage;
+  }
+
+  const lexicalPath = path.resolve(root, relative);
+  if (!isStrictlyWithin(root, lexicalPath)) {
+    return outsideStorage;
+  }
+
+  try {
+    const [realRoot, realPath] = await Promise.all([realpath(root), realpath(lexicalPath)]);
+    if (!isStrictlyWithin(realRoot, realPath)) {
+      return outsideStorage;
+    }
+    const stats = await stat(realPath);
+    if (!stats.isFile()) {
+      return notFound;
+    }
+    return { ok: true, value: { path: realPath, size: stats.size, mtimeMs: stats.mtimeMs } };
+  } catch (error) {
+    if (isMissing(error)) {
+      return notFound;
+    }
+    throw error;
+  }
 }
 
 /**

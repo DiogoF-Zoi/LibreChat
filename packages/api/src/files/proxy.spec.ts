@@ -13,7 +13,6 @@ import type { TFile } from 'librechat-data-provider';
 import type { AddressInfo } from 'net';
 import type { SignedDownloadFile, SignedDownloadHandlerDeps } from './proxy';
 import type { GetAppConfigOptions } from '~/app/service';
-import type { ServerRequest } from '~/types/http';
 import { createSignedDownloadHandler } from './proxy';
 import { getSignedDownloadURL } from './signed';
 
@@ -26,11 +25,18 @@ const sha256 = (data: Buffer) => crypto.createHash('sha256').update(data).digest
 const alterSignature = (url: string) =>
   url.replace(/signature=(.)/, (_match, first: string) => `signature=${first === 'A' ? 'B' : 'A'}`);
 
+const binaryParser = (res: request.Response, done: (error: Error | null, body: Buffer) => void) => {
+  const chunks: Buffer[] = [];
+  res.on('data', (chunk: Buffer) => chunks.push(chunk));
+  res.on('end', () => done(null, Buffer.concat(chunks)));
+};
+
 describe('createSignedDownloadHandler', () => {
+  let base: string;
   let uploads: string;
+  let storedPath: string;
   let file: SignedDownloadFile;
   let content: Buffer;
-  let openLocalStream: jest.Mock<Promise<Readable>, [ServerRequest, string]>;
   let deps: jest.Mocked<SignedDownloadHandlerDeps>;
   let app: express.Express;
 
@@ -45,18 +51,30 @@ describe('createSignedDownloadHandler', () => {
     return `${parsed.pathname}${parsed.search}`;
   }
 
+  const download = async (target?: string) =>
+    request(app)
+      .get(target ?? (await signedPath()))
+      .buffer(true)
+      .parse(binaryParser);
+
   beforeAll(() => {
-    uploads = fs.mkdtempSync(path.join(os.tmpdir(), 'signed-download-'));
-    fs.mkdirSync(path.join(uploads, 'user-1'));
+    /** The native resolver, as the handler uses; it also expands Windows 8.3 short names. */
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'signed-download-')));
+    uploads = path.join(base, 'uploads');
+    fs.mkdirSync(path.join(uploads, 'user-1'), { recursive: true });
+    fs.mkdirSync(path.join(base, 'images'));
+    fs.mkdirSync(path.join(base, 'outside'));
+    fs.writeFileSync(path.join(base, 'outside', 'secret.txt'), 'secret');
   });
 
   afterAll(() => {
-    fs.rmSync(uploads, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true });
   });
 
   beforeEach(() => {
     content = crypto.randomBytes(64 * 1024);
-    fs.writeFileSync(path.join(uploads, 'user-1', 'file-1__report.pdf'), content);
+    storedPath = path.join(uploads, 'user-1', 'file-1__report.pdf');
+    fs.writeFileSync(storedPath, content);
     file = {
       _id: id,
       file_id: 'file-1',
@@ -64,18 +82,13 @@ describe('createSignedDownloadHandler', () => {
       filepath: '/uploads/user-1/file-1__report.pdf',
       source: FileSources.local,
     };
-    openLocalStream = jest.fn(async (req: ServerRequest, filepath: string) =>
-      fs.createReadStream(
-        path.join(req.config?.paths?.uploads ?? '', filepath.replace(/^\/uploads\//, '')),
-      ),
-    );
     deps = {
       getSecret: jest.fn(() => secret),
       getFiles: jest.fn(async (_filter: { _id: string }) => [file]),
       getAppConfig: jest.fn(
-        async (_options: GetAppConfigOptions) => ({ paths: { uploads } }) as unknown as AppConfig,
+        async (_options: GetAppConfigOptions) =>
+          ({ paths: { uploads, imageOutput: path.join(base, 'images') } }) as unknown as AppConfig,
       ),
-      getStrategyFunctions: jest.fn((_source: string) => ({ getDownloadStream: openLocalStream })),
       getContentDisposition: jest.fn((name: string) => `attachment; filename="${name}"`),
     };
     app = express();
@@ -86,26 +99,113 @@ describe('createSignedDownloadHandler', () => {
     jest.restoreAllMocks();
   });
 
-  it('streams the original bytes without a session', async () => {
-    const response = await request(app)
-      .get(await signedPath())
-      .buffer(true)
-      .parse((res, done) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('end', () => done(null, Buffer.concat(chunks)));
-      });
+  it('streams the original bytes from disk without a session', async () => {
+    const readStream = jest.spyOn(fs, 'createReadStream');
+
+    const response = await download();
 
     expect(response.status).toBe(200);
     expect(sha256(response.body as Buffer)).toBe(sha256(content));
+    expect(response.headers['content-length']).toBe(String(content.length));
     expect(response.headers['content-type']).toBe('application/octet-stream');
     expect(response.headers['content-disposition']).toBe('attachment; filename="report.pdf"');
     expect(response.headers['cache-control']).toBe('no-store');
     expect(response.headers['x-content-type-options']).toBe('nosniff');
     expect(response.headers['referrer-policy']).toBe('no-referrer');
+    expect(response.headers['accept-ranges']).toBe('bytes');
+    expect(response.headers['etag']).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/);
+    expect(response.headers['last-modified']).toBeTruthy();
+    expect(readStream).toHaveBeenCalledWith(storedPath, expect.anything());
     expect(deps.getFiles).toHaveBeenCalledWith({ _id: id });
     expect(deps.getAppConfig).toHaveBeenCalledWith({ baseOnly: true });
-    expect(openLocalStream).toHaveBeenCalledWith(expect.anything(), file.filepath);
+  });
+
+  it('serves a single byte range', async () => {
+    const response = await request(app)
+      .get(await signedPath())
+      .set('Range', 'bytes=100-199')
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(response.status).toBe(206);
+    expect(response.headers['content-range']).toBe(`bytes 100-199/${content.length}`);
+    expect(response.headers['content-length']).toBe('100');
+    expect(sha256(response.body as Buffer)).toBe(sha256(content.subarray(100, 200)));
+  });
+
+  it('serves a suffix range', async () => {
+    const response = await request(app)
+      .get(await signedPath())
+      .set('Range', 'bytes=-10')
+      .buffer(true)
+      .parse(binaryParser);
+
+    expect(response.status).toBe(206);
+    expect(sha256(response.body as Buffer)).toBe(sha256(content.subarray(-10)));
+  });
+
+  it('answers an unsatisfiable range with 416 and the full length', async () => {
+    const response = await request(app)
+      .get(await signedPath())
+      .set('Range', `bytes=${content.length + 1}-`);
+
+    expect(response.status).toBe(416);
+    expect(response.headers['content-range']).toBe(`bytes */${content.length}`);
+    expect(response.headers['content-disposition']).toBeUndefined();
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('resumes with If-Range only while the bytes are unchanged', async () => {
+    const target = await signedPath();
+    const { headers } = await request(app).head(target);
+
+    const resumed = await request(app)
+      .get(target)
+      .set('Range', 'bytes=10-')
+      .set('If-Range', headers['etag'])
+      .buffer(true)
+      .parse(binaryParser);
+    expect(resumed.status).toBe(206);
+
+    fs.writeFileSync(storedPath, crypto.randomBytes(content.length + 1));
+    const replaced = await request(app)
+      .get(target)
+      .set('Range', 'bytes=10-')
+      .set('If-Range', headers['etag'])
+      .buffer(true)
+      .parse(binaryParser);
+    expect(replaced.status).toBe(200);
+    expect((replaced.body as Buffer).length).toBe(content.length + 1);
+  });
+
+  it('answers HEAD with the headers and no body', async () => {
+    const response = await request(app).head(await signedPath());
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-length']).toBe(String(content.length));
+    expect(response.headers['content-disposition']).toBe('attachment; filename="report.pdf"');
+    expect(response.body).toEqual({});
+  });
+
+  it('serves a zero-byte file', async () => {
+    fs.writeFileSync(storedPath, Buffer.alloc(0));
+
+    const response = await download();
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-length']).toBe('0');
+    expect((response.body as Buffer).length).toBe(0);
+  });
+
+  it('serves concurrent downloads of one URL independently', async () => {
+    const target = await signedPath();
+
+    const responses = await Promise.all(Array.from({ length: 8 }, () => download(target)));
+
+    for (const response of responses) {
+      expect(response.status).toBe(200);
+      expect(sha256(response.body as Buffer)).toBe(sha256(content));
+    }
   });
 
   it('looks the record up in the system tenant context', async () => {
@@ -164,7 +264,7 @@ describe('createSignedDownloadHandler', () => {
       const response = await request(app).get(await signedPath());
 
       expect(response.status).toBe(404);
-      expect(deps.getStrategyFunctions).not.toHaveBeenCalled();
+      expect(deps.getAppConfig).not.toHaveBeenCalled();
     },
   );
 
@@ -175,12 +275,27 @@ describe('createSignedDownloadHandler', () => {
   });
 
   it('returns 404 when the stored bytes are gone', async () => {
-    fs.rmSync(path.join(uploads, 'user-1', 'file-1__report.pdf'));
+    fs.rmSync(storedPath);
     const response = await request(app).get(await signedPath());
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ error: 'Not Found', code: 'file_not_found' });
     expect(response.headers['content-disposition']).toBeUndefined();
+  });
+
+  it.each([
+    ['under an unknown root', () => '/outside/secret.txt'],
+    ['at an absolute path', () => path.join(base, 'outside', 'secret.txt')],
+    ['behind a traversal out of uploads', () => '/uploads/../outside/secret.txt'],
+  ])('never serves a record stored %s', async (_label, filepath) => {
+    file = { ...file, filepath: filepath() };
+    const warn = jest.spyOn(logger, 'warn');
+
+    const response = await request(app).get(await signedPath());
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: 'Not Found', code: 'file_not_found' });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('outside the servable roots'));
   });
 
   it('fails closed when no signing secret is configured', async () => {
@@ -191,6 +306,15 @@ describe('createSignedDownloadHandler', () => {
 
     expect(response.status).toBe(500);
     expect(deps.getFiles).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when storage paths are not configured', async () => {
+    deps.getAppConfig.mockResolvedValue({} as AppConfig);
+
+    const response = await request(app).get(await signedPath());
+
+    expect(response.status).toBe(500);
+    expect(response.headers['content-disposition']).toBeUndefined();
   });
 
   it('never logs the signature or the request URL', async () => {
@@ -211,7 +335,7 @@ describe('createSignedDownloadHandler', () => {
     expect(logged).not.toContain('expires=');
   });
 
-  it('releases the source when the client disconnects mid-download', async () => {
+  it('releases the file stream when the client disconnects mid-download', async () => {
     let destroyed!: () => void;
     const sourceDestroyed = new Promise<void>((resolve) => (destroyed = resolve));
     const endless = new Readable({
@@ -223,7 +347,7 @@ describe('createSignedDownloadHandler', () => {
         callback(error);
       },
     });
-    deps.getStrategyFunctions.mockReturnValue({ getDownloadStream: async () => endless });
+    jest.spyOn(fs, 'createReadStream').mockReturnValueOnce(endless as unknown as fs.ReadStream);
 
     const server = app.listen(0);
     try {

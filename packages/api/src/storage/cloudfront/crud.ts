@@ -34,7 +34,7 @@ import {
   createRemoteFileByteLimitTransform,
 } from '~/storage/url';
 import { AVATAR_BASE_PATH, DEFAULT_BASE_PATH as defaultBasePath } from '~/storage/constants';
-import { sanitizeContentDispositionFilename } from '~/storage/validation';
+import { formatContentDisposition } from '~/storage/disposition';
 import { getCloudFrontConfig } from '~/cdn/cloudfront';
 import { s3Config } from '~/storage/s3/s3Config';
 
@@ -119,9 +119,9 @@ function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLRe
   }
 
   const expiry = expiresIn ?? config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
-  const expiresAtMs = Date.now() + expiry * 1000;
-  const expiresAtEpoch = Math.floor(expiresAtMs / 1000);
-  const expiresAt = new Date(expiresAtMs);
+  /** CloudFront expiries are whole epoch seconds, so `expiresAt` is truncated to match. */
+  const expiresAtEpoch = Math.floor(Date.now() / 1000) + expiry;
+  const expiresAt = new Date(expiresAtEpoch * 1000);
 
   const urlString = url.toString();
   const parsedUrl = url instanceof URL ? url : new URL(urlString);
@@ -161,6 +161,7 @@ function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLRe
   };
 }
 
+/** The disposition is always `attachment`, so the object is saved rather than rendered. */
 function appendDownloadOverrides(
   url: string,
   customFilename: string | null,
@@ -168,13 +169,10 @@ function appendDownloadOverrides(
 ): URL {
   const downloadUrl = new URL(url);
 
-  if (customFilename) {
-    const safeFilename = sanitizeContentDispositionFilename(customFilename);
-    downloadUrl.searchParams.set(
-      'response-content-disposition',
-      `attachment; filename="${safeFilename}"`,
-    );
-  }
+  downloadUrl.searchParams.set(
+    'response-content-disposition',
+    formatContentDisposition(customFilename),
+  );
   if (contentType) {
     downloadUrl.searchParams.set('response-content-type', contentType);
   }

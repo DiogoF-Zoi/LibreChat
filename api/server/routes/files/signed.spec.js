@@ -121,6 +121,25 @@ describe('GET /api/files/signed/:id (local storage)', () => {
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
+  it('lets a consumer probe with HEAD and resume with a byte range', async () => {
+    const { record, content } = await storeLocalFile({ bytes: 1024 * 1024 });
+    const { url } = await issueURL(record);
+
+    const head = await request(app).head(routePath(url));
+    expect(head.status).toBe(200);
+    expect(head.headers['content-length']).toBe(String(content.length));
+    expect(head.headers['accept-ranges']).toBe('bytes');
+
+    const tail = await request(app)
+      .get(routePath(url))
+      .set('Range', `bytes=${content.length - 4096}-`)
+      .set('If-Range', head.headers.etag)
+      .buffer(true)
+      .parse(binaryParser);
+    expect(tail.status).toBe(206);
+    expect(sha256(tail.body)).toBe(sha256(content.subarray(content.length - 4096)));
+  });
+
   it('rejects a URL moved onto another record', async () => {
     const first = await storeLocalFile();
     const second = await storeLocalFile({ tenantId: 'tenant-b' });

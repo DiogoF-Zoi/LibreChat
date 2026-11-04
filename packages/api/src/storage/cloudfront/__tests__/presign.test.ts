@@ -120,17 +120,55 @@ describe('CloudFront signed download URLs (real signer, throwaway key)', () => {
     expect(epoch - before).toBeLessThanOrEqual(7202);
   });
 
-  it('uses a canned policy with the requested expiry when there are no response overrides', async () => {
-    const { url: signedUrl, expiresAt } = await getCloudFrontDownloadURL({
-      file: fileFor('uploads/user1/report.pdf'),
+  it.each([0, 499, 500, 999])(
+    'reports exactly the signed expiry when signing at +%dms past a second',
+    async (millis) => {
+      jest.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 10, 3, 12, 0, 0, millis));
+      try {
+        const { url: signedUrl, expiresAt } = await getCloudFrontDownloadURL({
+          file: fileFor('uploads/user1/report.pdf'),
+          expiresIn: 300,
+        });
+        const epoch =
+          inspect(signedUrl).policy.Statement[0].Condition.DateLessThan['AWS:EpochTime'];
+
+        expect(expiresAt.getTime()).toBe(epoch * 1000);
+        expect(epoch).toBe(Date.UTC(2026, 10, 3, 12, 5, 0) / 1000);
+      } finally {
+        jest.restoreAllMocks();
+      }
+    },
+  );
+
+  it.each([undefined, null, ''])(
+    'always signs an attachment disposition, even when the filename is %p',
+    async (customFilename) => {
+      const { url: signedUrl } = await getCloudFrontDownloadURL({
+        file: fileFor('uploads/user1/page.html'),
+        customFilename,
+        contentType: 'text/html',
+        expiresIn: 300,
+      });
+      const { url, verifies } = inspect(signedUrl);
+
+      expect(url.searchParams.get('response-content-disposition')).toBe(
+        `attachment; filename="download"; filename*=UTF-8''download`,
+      );
+      expect(verifies()).toBe(true);
+    },
+  );
+
+  it('signs a non-ASCII filename as an ASCII-only RFC 5987 disposition', async () => {
+    const { url: signedUrl } = await getCloudFrontDownloadURL({
+      file: fileFor('uploads/user1/r.xlsx'),
+      customFilename: 'relatório.xlsx',
       expiresIn: 300,
     });
-    const url = new URL(signedUrl);
+    const disposition = inspect(signedUrl).url.searchParams.get('response-content-disposition');
 
-    expect(url.searchParams.has('Policy')).toBe(false);
-    expect(Number(url.searchParams.get('Expires'))).toBe(Math.floor(expiresAt.getTime() / 1000));
-    expect(url.searchParams.get('Key-Pair-Id')).toBe(KEY_PAIR_ID);
-    expect(url.searchParams.get('Signature')).toBeTruthy();
+    expect(disposition).toBe(
+      `attachment; filename="relato_rio.xlsx"; filename*=UTF-8''relat%C3%B3rio.xlsx`,
+    );
   });
 
   it('rejects a policy rewritten to another object or a later expiry', async () => {

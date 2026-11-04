@@ -278,8 +278,9 @@ describe('CloudFront CRUD', () => {
 
       const { dateLessThan } = mockGetSignedUrl.mock.calls[0][0] as { dateLessThan: string };
       const expiry = new Date(dateLessThan).getTime();
-      expect(expiry).toBeGreaterThanOrEqual(before + 7200 * 1000);
-      expect(expiry).toBeLessThanOrEqual(after + 7200 * 1000 + 100);
+      expect(expiry % 1000).toBe(0);
+      expect(expiry).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000 + 7200 * 1000);
+      expect(expiry).toBeLessThanOrEqual(after + 7200 * 1000);
     });
 
     it('falls back to s3Config expiry when urlExpiry not set', async () => {
@@ -295,8 +296,9 @@ describe('CloudFront CRUD', () => {
       const { dateLessThan } = mockGetSignedUrl.mock.calls[0][0] as { dateLessThan: string };
       const expiry = new Date(dateLessThan).getTime();
       // 900s fallback from mocked s3Config
-      expect(expiry).toBeGreaterThanOrEqual(before + 900 * 1000);
-      expect(expiry).toBeLessThanOrEqual(after + 900 * 1000 + 100);
+      expect(expiry % 1000).toBe(0);
+      expect(expiry).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000 + 900 * 1000);
+      expect(expiry).toBeLessThanOrEqual(after + 900 * 1000);
     });
 
     it('throws when CloudFront is not initialized', async () => {
@@ -872,12 +874,17 @@ describe('CloudFront CRUD', () => {
           filepath: 'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
         }),
       );
+      const signingInput = mockGetSignedUrl.mock.calls[0][0] as { url: string; policy: string };
+      const signedUrl = new URL(signingInput.url);
+      expect(`${signedUrl.origin}${signedUrl.pathname}`).toBe(
+        'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
+      );
+      expect(signedUrl.searchParams.get('response-content-disposition')).toBe(
+        `attachment; filename="download"; filename*=UTF-8''download`,
+      );
+      expect(signingInput.policy).toContain('doc.pdf?*');
       expect(mockGetSignedUrl).toHaveBeenCalledWith(
-        expect.objectContaining({
-          url: 'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
-          keyPairId: 'K123',
-          privateKey: 'pk-secret',
-        }),
+        expect.objectContaining({ keyPairId: 'K123', privateKey: 'pk-secret' }),
       );
     });
 
@@ -898,7 +905,7 @@ describe('CloudFront CRUD', () => {
       expect(result.url).toBe('signed-url');
       const signedInputUrl = new URL((mockGetSignedUrl.mock.calls[0][0] as { url: string }).url);
       expect(signedInputUrl.searchParams.get('response-content-disposition')).toBe(
-        'attachment; filename="reportbad.pdf"',
+        `attachment; filename="report_;_bad.pdf"; filename*=UTF-8''report%22%3B%5Cbad.pdf`,
       );
       expect(mockGetSignedUrl).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -940,10 +947,11 @@ describe('CloudFront CRUD', () => {
       });
 
       const lifetimeMs = result.expiresAt.getTime() - before;
-      expect(lifetimeMs).toBeGreaterThanOrEqual(300_000);
-      expect(lifetimeMs).toBeLessThan(310_000);
-      const input = mockGetSignedUrl.mock.calls[0][0] as { dateLessThan: string };
-      expect(new Date(input.dateLessThan).getTime()).toBe(result.expiresAt.getTime());
+      expect(lifetimeMs).toBeGreaterThan(299_000);
+      expect(lifetimeMs).toBeLessThanOrEqual(300_000);
+      const input = mockGetSignedUrl.mock.calls[0][0] as { policy: string };
+      const epoch = JSON.parse(input.policy).Statement[0].Condition.DateLessThan['AWS:EpochTime'];
+      expect(epoch * 1000).toBe(result.expiresAt.getTime());
     });
 
     it('falls back to cloudfront.urlExpiry when no expiresIn is requested', async () => {
@@ -960,8 +968,8 @@ describe('CloudFront CRUD', () => {
       });
 
       const lifetimeMs = result.expiresAt.getTime() - before;
-      expect(lifetimeMs).toBeGreaterThanOrEqual(7_200_000);
-      expect(lifetimeMs).toBeLessThan(7_210_000);
+      expect(lifetimeMs).toBeGreaterThan(7_199_000);
+      expect(lifetimeMs).toBeLessThanOrEqual(7_200_000);
     });
 
     it('throws when signing keys are missing', async () => {

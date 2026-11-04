@@ -1,13 +1,13 @@
-import { FileSources } from 'librechat-data-provider';
+import crypto from 'node:crypto';
+import { FileSources, MAX_DOWNLOAD_URL_EXPIRY_SECONDS } from 'librechat-data-provider';
 import type { TFile } from 'librechat-data-provider';
-import {
-  getSignedDownloadURL,
-  verifySignedDownload,
-  SIGNED_DOWNLOAD_PATH,
-  MAX_DOWNLOAD_URL_EXPIRY_SECONDS,
-} from './signed';
+import type { SignedDownloadInput } from './signed';
+import { getSignedDownloadURL, verifySignedDownload, SIGNED_DOWNLOAD_PATH } from './signed';
 
 const secret = 'a'.repeat(64);
+
+const verify = (input: Omit<SignedDownloadInput, 'method'> & { method?: string }) =>
+  verifySignedDownload({ method: 'GET', ...input });
 const baseURL = 'https://chat.example.com';
 const now = Date.parse('2026-11-02T10:00:00.000Z');
 const id = '507f1f77bcf86cd799439011';
@@ -88,26 +88,25 @@ describe('verifySignedDownload', () => {
   it('accepts a URL it issued until it expires', async () => {
     const { id: urlId, expires, signature } = await issue({ expiresIn: 60 });
 
-    expect(verifySignedDownload({ secret, id: urlId, expires, signature, now })).toEqual({
+    expect(verify({ secret, id: urlId, expires, signature, now })).toEqual({
       ok: true,
       value: { id },
     });
-    expect(
-      verifySignedDownload({ secret, id: urlId, expires, signature, now: now + 59_999 }).ok,
-    ).toBe(true);
+    expect(verify({ secret, id: urlId, expires, signature, now: now + 59_999 }).ok).toBe(true);
   });
 
   it('reports expiry once the lifetime has passed', async () => {
     const { id: urlId, expires, signature } = await issue({ expiresIn: 60 });
 
-    expect(
-      verifySignedDownload({ secret, id: urlId, expires, signature, now: now + 60_000 }),
-    ).toEqual({ ok: false, error: { code: 'expired_url' } });
+    expect(verify({ secret, id: urlId, expires, signature, now: now + 60_000 })).toEqual({
+      ok: false,
+      error: { code: 'expired_url' },
+    });
   });
 
   it('rejects a signature from another secret', async () => {
     const { id: urlId, expires, signature } = await issue();
-    const result = verifySignedDownload({
+    const result = verify({
       secret: 'b'.repeat(64),
       id: urlId,
       expires,
@@ -117,9 +116,30 @@ describe('verifySignedDownload', () => {
     expect(result).toEqual({ ok: false, error: { code: 'invalid_url' } });
   });
 
+  it('binds the signature to a read: HEAD is accepted, other methods are not', async () => {
+    const { id: urlId, expires, signature } = await issue();
+
+    expect(verify({ method: 'HEAD', secret, id: urlId, expires, signature, now }).ok).toBe(true);
+    for (const method of ['POST', 'PUT', 'DELETE', 'get']) {
+      expect(verify({ method, secret, id: urlId, expires, signature, now })).toEqual({
+        ok: false,
+        error: { code: 'invalid_url' },
+      });
+    }
+  });
+
+  it('never signs with the raw secret', async () => {
+    const { id: urlId, expires, signature } = await issue();
+    const rawKeySignatures = [`GET\n${urlId}\n${expires}`, `${urlId}:${expires}`].map((payload) =>
+      crypto.createHmac('sha256', secret).update(payload).digest('base64url'),
+    );
+
+    expect(rawKeySignatures).not.toContain(signature);
+  });
+
   it('rejects a signature moved onto another record', async () => {
     const { expires, signature } = await issue();
-    const result = verifySignedDownload({
+    const result = verify({
       secret,
       id: '507f1f77bcf86cd799439012',
       expires,
@@ -132,31 +152,27 @@ describe('verifySignedDownload', () => {
   it('rejects an extended expiry as invalid, not expired', async () => {
     const { id: urlId, expires, signature } = await issue();
     const extended = String(Number(expires) + 60);
-    expect(
-      verifySignedDownload({ secret, id: urlId, expires: extended, signature, now: now + 400_000 }),
-    ).toEqual({ ok: false, error: { code: 'invalid_url' } });
+    expect(verify({ secret, id: urlId, expires: extended, signature, now: now + 400_000 })).toEqual(
+      { ok: false, error: { code: 'invalid_url' } },
+    );
   });
 
   it('rejects a single altered signature character', async () => {
     const { id: urlId, expires, signature } = await issue();
     const last = signature!.slice(-1);
     const altered = `${signature!.slice(0, -1)}${last === 'A' ? 'B' : 'A'}`;
-    expect(verifySignedDownload({ secret, id: urlId, expires, signature: altered, now }).ok).toBe(
-      false,
-    );
+    expect(verify({ secret, id: urlId, expires, signature: altered, now }).ok).toBe(false);
   });
 
   it('rejects a correctly signed expiry beyond the lifetime cap', async () => {
     const signedLater = now + MAX_DOWNLOAD_URL_EXPIRY_SECONDS * 1000;
     const { id: urlId, expires, signature } = await issue({ now: signedLater, expiresIn: 300 });
 
-    expect(verifySignedDownload({ secret, id: urlId, expires, signature, now })).toEqual({
+    expect(verify({ secret, id: urlId, expires, signature, now })).toEqual({
       ok: false,
       error: { code: 'invalid_url' },
     });
-    expect(
-      verifySignedDownload({ secret, id: urlId, expires, signature, now: signedLater }).ok,
-    ).toBe(true);
+    expect(verify({ secret, id: urlId, expires, signature, now: signedLater }).ok).toBe(true);
   });
 
   it.each([
@@ -172,7 +188,7 @@ describe('verifySignedDownload', () => {
     ['path traversal id', { id: '../../etc/passwd' }],
   ])('rejects a %s', async (_label, overrides) => {
     const issued = await issue();
-    const result = verifySignedDownload({
+    const result = verify({
       secret,
       id: issued.id,
       expires: issued.expires,

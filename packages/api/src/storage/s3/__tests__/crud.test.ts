@@ -58,6 +58,9 @@ describe('S3 CRUD', () => {
     process.env.AWS_REGION = 'us-east-1';
     process.env.AWS_BUCKET_NAME = 'test-bucket';
     process.env.S3_URL_EXPIRY_SECONDS = '120';
+    /** Static keys carry no expiration, so download URL expiry is the requested lifetime. */
+    process.env.AWS_ACCESS_KEY_ID = 'AKIATESTTESTTESTTEST';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-access-key';
   });
 
   afterAll(() => {
@@ -514,7 +517,7 @@ describe('S3 CRUD', () => {
         expect.anything(),
         expect.objectContaining({
           input: expect.objectContaining({
-            ResponseContentDisposition: 'attachment; filename="custom-name.pdf"',
+            ResponseContentDisposition: `attachment; filename="custom-name.pdf"; filename*=UTF-8''custom-name.pdf`,
           }),
         }),
         expect.anything(),
@@ -1305,7 +1308,7 @@ describe('S3 CRUD', () => {
         expect.objectContaining({
           input: expect.objectContaining({
             Key: 't/tenantA/uploads/user123/file.pdf',
-            ResponseContentDisposition: 'attachment; filename="downloadbad.pdf"',
+            ResponseContentDisposition: `attachment; filename="download_;_bad.pdf"; filename*=UTF-8''download%22%3B%5Cbad.pdf`,
             ResponseContentType: 'application/pdf',
           }),
         }),

@@ -104,6 +104,62 @@ describe('S3 presigned download URL (integration)', () => {
     expect(Buffer.from(await res.arrayBuffer()).equals(BODY)).toBe(true);
   });
 
+  it('forces a download with the stored type and an RFC 5987 filename', async () => {
+    const file = await putObject(`${RUN_ID}/uploads/user1/page.bin`, 'text/html');
+    const { url } = await getS3DownloadURL({
+      file,
+      customFilename: 'relatório "final"; 日本語.xlsx',
+      contentType: 'text/html',
+    });
+
+    const res = await fetch(url);
+    await res.arrayBuffer();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/html');
+    const disposition = res.headers.get('content-disposition') as string;
+    expect(disposition.startsWith('attachment;')).toBe(true);
+    expect(disposition).toMatch(/^[\x20-\x7e]+$/);
+    expect(disposition).toContain(
+      `filename*=UTF-8''relat%C3%B3rio%20%22final%22%3B%20%E6%97%A5%E6%9C%AC%E8%AA%9E.xlsx`,
+    );
+  });
+
+  it.each([undefined, ''])('still forces a download when the filename is %p', async (name) => {
+    const file = await putObject(`${RUN_ID}/uploads/user1/nofilename.html`, 'text/html');
+    const { url } = await getS3DownloadURL({
+      file,
+      customFilename: name,
+      contentType: 'text/html',
+    });
+
+    const res = await fetch(url);
+    await res.arrayBuffer();
+
+    expect(res.headers.get('content-disposition')).toBe(
+      `attachment; filename="download"; filename*=UTF-8''download`,
+    );
+  });
+
+  it('serves a byte range straight from S3', async () => {
+    const file = await putObject(`${RUN_ID}/uploads/user1/range.txt`);
+    const { url } = await getS3DownloadURL({ file });
+
+    const res = await fetch(url, { headers: { Range: 'bytes=10-19' } });
+
+    expect(res.status).toBe(206);
+    expect(Buffer.from(await res.arrayBuffer()).equals(BODY.subarray(10, 20))).toBe(true);
+  });
+
+  it('reports an expiresAt no later than the moment S3 stops honouring the URL', async () => {
+    const file = await putObject(`${RUN_ID}/uploads/user1/boundary.txt`);
+    const { url, expiresAt } = await getS3DownloadURL({ file, expiresIn: 3 });
+
+    await new Promise((resolve) => setTimeout(resolve, expiresAt.getTime() - Date.now() + 1500));
+
+    expect((await fetch(url)).status).toBe(403);
+  }, 30_000);
+
   it('rejects a URL whose signature was altered', async () => {
     const file = await putObject(`${RUN_ID}/uploads/user1/tamper-sig.txt`);
     const { url } = await getS3DownloadURL({ file });

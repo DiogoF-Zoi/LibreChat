@@ -24,6 +24,7 @@ const {
   resolveAssistantToolPermissions,
   resolveDownloadPath,
   pipeToResponse,
+  isDirectDownloadSource,
   resolveFileDownloadURL,
 } = require('@librechat/api');
 const {
@@ -576,9 +577,18 @@ const DOWNLOAD_METADATA_FIELDS = [
   'updatedAt',
 ];
 
-const getDownloadFileMetadata = (file) => {
+/**
+ * Download URLs go to consumers outside the client (MCP tools), which need no storage location;
+ * a legacy remote `filepath` can itself be a presigned URL.
+ */
+const STORAGE_LOCATION_FIELDS = new Set(['filepath', 'storageKey', 'storageRegion']);
+const DOWNLOAD_URL_METADATA_FIELDS = DOWNLOAD_METADATA_FIELDS.filter(
+  (field) => !STORAGE_LOCATION_FIELDS.has(field),
+);
+
+const getDownloadFileMetadata = (file, fields = DOWNLOAD_METADATA_FIELDS) => {
   const rawFile = typeof file.toObject === 'function' ? file.toObject() : file;
-  return DOWNLOAD_METADATA_FIELDS.reduce((metadata, field) => {
+  return fields.reduce((metadata, field) => {
     if (rawFile[field] !== undefined) {
       metadata[field] = rawFile[field];
     }
@@ -615,7 +625,7 @@ router.get('/download-url/:userId/:file_id', fileAccess, async (req, res) => {
       expiresAt: result.value.expiresAt.toISOString(),
       filename,
       type: file.type || 'application/octet-stream',
-      metadata: getDownloadFileMetadata(file),
+      metadata: getDownloadFileMetadata(file, DOWNLOAD_URL_METADATA_FIELDS),
     });
   } catch (error) {
     logger.error(
@@ -700,7 +710,7 @@ router.get('/download/:userId/:file_id', fileAccess, async (req, res) => {
 
       stream.pipe(res);
     } else {
-      if (getDownloadURL && req.query.direct === 'true') {
+      if (getDownloadURL && req.query.direct === 'true' && isDirectDownloadSource(file.source)) {
         try {
           const result = await getDirectDownloadURL({ req, file });
           if (result.ok) {

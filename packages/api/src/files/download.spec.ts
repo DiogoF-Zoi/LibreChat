@@ -1,6 +1,14 @@
-import { FileSources } from 'librechat-data-provider';
+import {
+  FileSources,
+  MAX_DOWNLOAD_URL_EXPIRY_SECONDS,
+  DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS,
+} from 'librechat-data-provider';
 import type { TFile } from 'librechat-data-provider';
-import { resolveFileDownloadURL, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS } from './download';
+import {
+  isDirectDownloadSource,
+  resolveFileDownloadURL,
+  resolveDownloadURLExpiry,
+} from './download';
 
 const expiresAt = new Date('2026-10-23T11:00:00.000Z');
 
@@ -55,6 +63,21 @@ describe('resolveFileDownloadURL', () => {
       expect.objectContaining({ expiresIn: DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS }),
     );
     expect(DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS).toBe(300);
+  });
+
+  it('never hands a strategy a lifetime above the ceiling', async () => {
+    const { getDownloadURL, getStrategyFunctions } = createStrategy();
+
+    await resolveFileDownloadURL({
+      file: s3File,
+      filename: 'doc.pdf',
+      expiresIn: 7 * 24 * 3600,
+      getStrategyFunctions,
+    });
+
+    expect(getDownloadURL).toHaveBeenCalledWith(
+      expect.objectContaining({ expiresIn: MAX_DOWNLOAD_URL_EXPIRY_SECONDS }),
+    );
   });
 
   it('falls back to a generic content type', async () => {
@@ -132,5 +155,36 @@ describe('resolveFileDownloadURL', () => {
     await expect(
       resolveFileDownloadURL({ file: s3File, filename: 'doc.pdf', getStrategyFunctions }),
     ).rejects.toThrow('S3 not initialized');
+  });
+});
+
+describe('resolveDownloadURLExpiry', () => {
+  it.each([
+    [undefined, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [1, 1],
+    [900, 900],
+    [MAX_DOWNLOAD_URL_EXPIRY_SECONDS, MAX_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [MAX_DOWNLOAD_URL_EXPIRY_SECONDS + 1, MAX_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [0, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [-60, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [1.5, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [Number.NaN, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS],
+    [Number.POSITIVE_INFINITY, DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS],
+  ])('resolves %p to %p seconds', (requested, expected) => {
+    expect(resolveDownloadURLExpiry(requested)).toBe(expected);
+  });
+});
+
+describe('isDirectDownloadSource', () => {
+  it.each([
+    [FileSources.s3, true],
+    [FileSources.cloudfront, true],
+    [FileSources.local, false],
+    [FileSources.azure_blob, false],
+    [FileSources.firebase, false],
+    [undefined, false],
+    [null, false],
+  ])('%p -> %p', (source, expected) => {
+    expect(isDirectDownloadSource(source)).toBe(expected);
   });
 });

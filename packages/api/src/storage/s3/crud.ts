@@ -48,11 +48,8 @@ import {
   INLINE_AVATAR_PATH_PREFIX,
   INLINE_IMAGE_PATH_PREFIX,
 } from '~/storage/constants';
-import {
-  assertS3FileName,
-  assertPathSegment,
-  sanitizeContentDispositionFilename,
-} from '~/storage/validation';
+import { assertS3FileName, assertPathSegment } from '~/storage/validation';
+import { formatContentDisposition } from '~/storage/disposition';
 import { dispatchFileDeletion } from '~/files/dispatch';
 import { getSafeErrorMetadata } from '~/utils/errors';
 import { initializeS3 } from '~/cdn/s3';
@@ -291,20 +288,19 @@ export function resolveStoredS3Key(file: StoredFileRef): string {
 
 async function getS3URLForKey({
   key,
-  customFilename = null,
+  contentDisposition = null,
   contentType = null,
   expiresIn = s3UrlExpirySeconds,
 }: {
   key: string;
-  customFilename?: string | null;
+  contentDisposition?: string | null;
   contentType?: string | null;
   expiresIn?: number;
 }): Promise<string> {
   const params: GetObjectCommandInput = { Bucket: bucketName, Key: key };
 
-  if (customFilename) {
-    const safeFilename = sanitizeContentDispositionFilename(customFilename);
-    params.ResponseContentDisposition = `attachment; filename="${safeFilename}"`;
+  if (contentDisposition) {
+    params.ResponseContentDisposition = contentDisposition;
   }
   if (contentType) {
     params.ResponseContentType = contentType;
@@ -343,7 +339,8 @@ export async function getS3URL({
     includeRegionInPath,
     useInlinePath,
   });
-  return getS3URLForKey({ key, customFilename, contentType });
+  const contentDisposition = customFilename ? formatContentDisposition(customFilename) : null;
+  return getS3URLForKey({ key, contentDisposition, contentType });
 }
 
 export async function saveBufferToS3({
@@ -903,6 +900,23 @@ export async function getS3FileStream(
   }
 }
 
+/**
+ * A presigned URL stops working when the credentials that signed it expire, whatever its
+ * `X-Amz-Expires` says. Static keys carry no expiration; role and STS credentials do.
+ */
+async function getSigningCredentialExpiry(): Promise<Date | undefined> {
+  const credentials = initializeS3()?.config?.credentials;
+  if (typeof credentials !== 'function') {
+    return undefined;
+  }
+  const { expiration } = await credentials();
+  return expiration;
+}
+
+/**
+ * Signs a download URL that always carries an `attachment` disposition, so a browser saves
+ * the object rather than rendering it, whatever content type it was stored with.
+ */
 export async function getS3DownloadURL({
   file,
   customFilename = null,
@@ -913,9 +927,20 @@ export async function getS3DownloadURL({
   if (!key) {
     throw new Error('[getS3DownloadURL] Unable to extract S3 key from file path');
   }
-  const signedAt = Date.now();
-  const url = await getS3URLForKey({ key, customFilename, contentType, expiresIn });
-  return { url, expiresAt: new Date(signedAt + expiresIn * 1000) };
+  /** `X-Amz-Date` has whole-second precision; flooring keeps `expiresAt` from overstating it. */
+  const signedAt = Math.floor(Date.now() / 1000) * 1000;
+  const url = await getS3URLForKey({
+    key,
+    contentDisposition: formatContentDisposition(customFilename),
+    contentType,
+    expiresIn,
+  });
+  const expiresAt = new Date(signedAt + expiresIn * 1000);
+  const credentialExpiry = await getSigningCredentialExpiry();
+  if (credentialExpiry && credentialExpiry < expiresAt) {
+    return { url, expiresAt: credentialExpiry };
+  }
+  return { url, expiresAt };
 }
 
 export function needsRefresh(signedUrl: string, bufferSeconds: number): boolean {
