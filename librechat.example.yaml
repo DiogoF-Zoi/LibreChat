@@ -1545,14 +1545,12 @@ endpoints:
 #       fileSizeLimit: 5
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
-#   # Lifetime in seconds of signed URLs for authenticated file downloads: S3, CloudFront and local storage
-#   # (max: 3600 / 1 hour). Defaults to 300. The clock starts when a URL is requested, not at upload.
-#   # Local storage URLs point at DOMAIN_SERVER/api/files/signed/<id> and are signed (GET/HEAD only) with a
-#   # key derived from JWT_SECRET; rotating JWT_SECRET invalidates outstanding URLs. Other S3 URLs (images,
-#   # avatars) keep using S3_URL_EXPIRY_SECONDS (120) and CloudFront asset URLs keep using `cloudfront.urlExpiry`.
-#   # Each URL is a bearer credential until it expires: LibreChat redacts its signature from logs and traces,
-#   # but reverse-proxy, load-balancer and CDN access logs record query strings by default. Strip or mask the
-#   # query string for /api/files/signed/ in those logs (e.g. nginx: a log_format using $uri, not $request).
+#   # Lifetime in seconds of signed file download URLs (S3, CloudFront and local storage). Max 3600.
+#   # Local URLs point at DOMAIN_SERVER/api/files/signed/<id> and are signed with a key derived from
+#   # JWT_SECRET, so rotating it invalidates outstanding URLs. Other S3 URLs (images, avatars) keep
+#   # using S3_URL_EXPIRY_SECONDS and CloudFront asset URLs keep using `cloudfront.urlExpiry`.
+#   # A URL is a bearer credential until it expires: LibreChat redacts it from its own logs, but proxy
+#   # and CDN access logs record query strings by default, so strip them for /api/files/signed/.
 #   downloadUrlExpiry: 300
 #   imageGeneration: # Image Gen settings, either percentage or px
 #     percentage: 100

@@ -27,20 +27,14 @@ export type FileDownloadURLRequest = {
   getStrategyFunctions: (source: string) => FileDownloadURLStrategy;
 };
 
-/**
- * Sources whose download URL points straight at the storage provider. A redirect to one moves
- * the transfer off this server; any other source's URL would point back at this server.
- */
+/** Sources whose download URL points at the storage provider, not back at this server. */
 const DIRECT_DOWNLOAD_SOURCES = new Set<string>([FileSources.s3, FileSources.cloudfront]);
 
 export function isDirectDownloadSource(source: string | null | undefined): boolean {
   return source != null && DIRECT_DOWNLOAD_SOURCES.has(source);
 }
 
-/**
- * Bounds a requested lifetime to whole seconds within the ceiling. The config schema already
- * enforces this; it is repeated here so no caller or strategy can sign a longer-lived URL.
- */
+/** Clamps to the lifetime ceiling even though the config schema does too, so no caller can exceed it. */
 export function resolveDownloadURLExpiry(expiresIn: number | undefined): number {
   if (expiresIn === undefined || !Number.isInteger(expiresIn) || expiresIn <= 0) {
     return DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS;
@@ -63,7 +57,7 @@ export async function resolveFileDownloadURL({
   if (checkOpenAIStorage(source)) {
     return { ok: false, error: { code: file.model ? 'unsupported_source' : 'missing_model' } };
   }
-  /** Text files resolve to the local strategy but keep their content in the database, not on disk. */
+  /** Text files resolve to the local strategy but their content lives in the database. */
   if (source === FileSources.text) {
     return { ok: false, error: { code: 'unsupported_source' } };
   }

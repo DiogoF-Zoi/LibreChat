@@ -900,10 +900,7 @@ export async function getS3FileStream(
   }
 }
 
-/**
- * A presigned URL stops working when the credentials that signed it expire, whatever its
- * `X-Amz-Expires` says. Static keys carry no expiration; role and STS credentials do.
- */
+/** A presigned URL dies with its signing credentials, whatever `X-Amz-Expires` says. Static keys never expire. */
 async function getSigningCredentialExpiry(): Promise<Date | undefined> {
   const credentials = initializeS3()?.config?.credentials;
   if (typeof credentials !== 'function') {
@@ -913,10 +910,7 @@ async function getSigningCredentialExpiry(): Promise<Date | undefined> {
   return expiration;
 }
 
-/**
- * Signs a download URL that always carries an `attachment` disposition, so a browser saves
- * the object rather than rendering it, whatever content type it was stored with.
- */
+/** Always signs an `attachment` disposition, so browsers save the object rather than render it. */
 export async function getS3DownloadURL({
   file,
   customFilename = null,
@@ -927,7 +921,7 @@ export async function getS3DownloadURL({
   if (!key) {
     throw new Error('[getS3DownloadURL] Unable to extract S3 key from file path');
   }
-  /** `X-Amz-Date` has whole-second precision; flooring keeps `expiresAt` from overstating it. */
+  /** `X-Amz-Date` has whole-second precision; flooring keeps `expiresAt` from overstating. */
   const signedAt = Math.floor(Date.now() / 1000) * 1000;
   const url = await getS3URLForKey({
     key,

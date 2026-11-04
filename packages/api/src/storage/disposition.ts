@@ -18,11 +18,9 @@ function getAsciiFilenameFallback(filename: string): string {
 }
 
 /**
- * Builds an RFC 6266 `Content-Disposition` value: a quoted ASCII `filename` for old clients and
- * an RFC 5987 `filename*` carrying the exact UTF-8 name. The result is pure printable ASCII, so
- * it is safe both as a response header and as a signed storage override such as S3's
- * `response-content-disposition`. An empty name falls back to `download`, so the disposition
- * type is always present.
+ * RFC 6266 `Content-Disposition`: an ASCII `filename` fallback plus an RFC 5987 `filename*` with
+ * the exact UTF-8 name. Printable ASCII only, so it is safe as a header and as an S3
+ * `response-content-disposition` override.
  */
 export function formatContentDisposition(
   filename: string | null | undefined,

@@ -9,13 +9,9 @@ import { resolveLocalDownloadPath } from '~/storage/local';
 import { getSafeErrorMetadata } from '~/utils/errors';
 import { verifySignedDownload } from './signed';
 
-/**
- * Sources whose `getDownloadURL` signs a proxy URL. A record from any other source is not
- * served here even under a valid signature, since this server never issued one for it.
- */
+/** Only these sources issue proxy URLs, so no other record is served even under a valid signature. */
 const PROXY_DOWNLOAD_SOURCES = new Set<string>([FileSources.local]);
 
-/** Headers that describe the file body, dropped when an error response replaces it. */
 const FILE_BODY_HEADERS = [
   'Accept-Ranges',
   'Content-Disposition',
@@ -55,23 +51,17 @@ const sendNotFound = (res: Response) =>
 const removeFileBodyHeaders = (res: Response) =>
   FILE_BODY_HEADERS.forEach((name) => res.removeHeader(name));
 
-/**
- * A strong validator from size and modification time (nginx's scheme), so `If-Range` can resume
- * a partial download only while the bytes on disk are unchanged.
- */
+/** Strong validator from size and mtime (nginx's scheme), so `If-Range` resumes only an unchanged file. */
 const getStrongETag = ({ size, mtimeMs }: LocalDownloadFile): string =>
   `"${size.toString(16)}-${Math.floor(mtimeMs).toString(16)}"`;
 
 /**
- * Streams the file with `res.sendFile`, which reads it through `fs.createReadStream` and handles
- * `Content-Length`, single byte ranges (`206`/`416`), `If-Range`, `Last-Modified`, HEAD and
- * conditional requests, and destroys the read stream when the client disconnects. A failure
- * before the first byte still gets a status; after it, the connection is cut so the client
- * cannot mistake a truncated body for the whole file.
+ * `res.sendFile` handles ranges, conditional requests and HEAD. A failure after the headers are
+ * sent destroys the connection, so a truncated body is never mistaken for the whole file.
  */
 function sendLocalFile(res: Response, local: LocalDownloadFile, fileId: string): Promise<void> {
   return new Promise((resolve) => {
-    /** `dotfiles: 'allow'` is safe: the path was already confined to the storage roots. */
+    /** `dotfiles: 'allow'` is safe: the path is already confined to the storage roots. */
     const options = {
       acceptRanges: true,
       cacheControl: false,
@@ -113,12 +103,9 @@ function sendLocalFile(res: Response, local: LocalDownloadFile, fileId: string):
 }
 
 /**
- * Serves a file named by a signed download URL. The route is unauthenticated: the signature,
- * checked here, is the whole authorization, granted when the URL was issued to a user who
- * passed the file access checks. The record is looked up outside any tenant context because the
- * caller carries none; the signed id names exactly one record. Only files inside the configured
- * storage roots are served. Nothing from the request URL is logged, since its query string is
- * the credential.
+ * Serves a file named by a signed download URL. The route is unauthenticated: the signature is
+ * the whole authorization, so the record is looked up outside tenant context and nothing from
+ * the request URL is logged, since its query string is the credential.
  */
 export function createSignedDownloadHandler({
   getSecret,
@@ -158,7 +145,7 @@ export function createSignedDownloadHandler({
         return;
       }
 
-      /** Storage paths are deployment-wide, so the YAML base config is enough to resolve them. */
+      /** Storage paths are deployment-wide, so the base config is enough. */
       const { paths } = await getAppConfig({ baseOnly: true });
       if (!paths) {
         throw new Error('[signedDownload] Local storage paths are not configured');

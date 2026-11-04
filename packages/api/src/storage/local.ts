@@ -98,7 +98,6 @@ function isStrictlyWithin(directory: string, filePath: string): boolean {
   return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(`..${path.sep}`);
 }
 
-/** The storage roots a local download may be served from. */
 export interface LocalDownloadRoots {
   uploads: string;
   imageOutput: string;
@@ -107,7 +106,6 @@ export interface LocalDownloadRoots {
 export type LocalDownloadPathErrorCode = 'not_found' | 'outside_storage';
 
 export interface LocalDownloadFile {
-  /** Absolute path with symlinks resolved. */
   path: string;
   size: number;
   mtimeMs: number;
@@ -135,10 +133,8 @@ const isMissing = (error: unknown): boolean => {
 };
 
 /**
- * Resolves a local record's `filepath` to the real file it names, for a caller that holds no
- * session. Only paths under the uploads and image roots are servable. Containment is checked on
- * the lexical path and again after symlinks resolve, so a link inside a root cannot reach a file
- * outside it. A directory or a missing file is `not_found`.
+ * Resolves a record's `filepath` to a real file under the uploads or image roots. Containment is
+ * checked before and after symlinks resolve, so a link inside a root cannot escape it.
  */
 export async function resolveLocalDownloadPath(
   filepath: string,

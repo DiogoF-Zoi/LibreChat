@@ -661,9 +661,8 @@ const skillFileConfigSchema = z.object({
   deletionCleanupConcurrency: z.number().int().positive().optional(),
 });
 
-/** Lifetime of a signed file download URL when `fileConfig.downloadUrlExpiry` is unset. */
 export const DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS = 300;
-/** Ceiling on a signed file download URL's lifetime: the URL is a bearer capability. */
+/** Ceiling on signed download URL lifetime, since the URL is a bearer credential. */
 export const MAX_DOWNLOAD_URL_EXPIRY_SECONDS = 3600;
 
 export const fileConfigSchema = z.object({
@@ -683,7 +682,6 @@ export const fileConfigSchema = z.object({
   fileContextCharLimit: z.number().min(0).optional(),
   codeEnvLivenessSafeWindowMs: z.number().min(0).optional(),
   legacySearchProbeTimeoutMs: z.number().min(1).optional(),
-  /** Signed download URL lifetime in seconds; capped at 1 hour as the URL is a bearer capability. */
   downloadUrlExpiry: z.number().int().positive().max(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).optional(),
   imageGeneration: z
     .object({

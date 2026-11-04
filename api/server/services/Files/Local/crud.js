@@ -214,7 +214,6 @@ async function getLocalFileStream(req, requestedFilepath) {
   }
 }
 
-/** Signs a short-lived URL to the LibreChat download proxy, which streams the file from disk. */
 const getLocalDownloadURL = (params) =>
   getSignedDownloadURL({
     ...params,

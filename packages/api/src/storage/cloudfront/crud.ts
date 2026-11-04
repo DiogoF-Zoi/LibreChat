@@ -119,7 +119,6 @@ function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLRe
   }
 
   const expiry = expiresIn ?? config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
-  /** CloudFront expiries are whole epoch seconds, so `expiresAt` is truncated to match. */
   const expiresAtEpoch = Math.floor(Date.now() / 1000) + expiry;
   const expiresAt = new Date(expiresAtEpoch * 1000);
 
@@ -161,7 +160,6 @@ function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLRe
   };
 }
 
-/** The disposition is always `attachment`, so the object is saved rather than rendered. */
 function appendDownloadOverrides(
   url: string,
   customFilename: string | null,

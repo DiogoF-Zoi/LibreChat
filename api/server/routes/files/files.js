@@ -577,10 +577,7 @@ const DOWNLOAD_METADATA_FIELDS = [
   'updatedAt',
 ];
 
-/**
- * Download URLs go to consumers outside the client (MCP tools), which need no storage location;
- * a legacy remote `filepath` can itself be a presigned URL.
- */
+/** Download URLs go to consumers outside the client, and a legacy remote `filepath` can itself be a presigned URL. */
 const STORAGE_LOCATION_FIELDS = new Set(['filepath', 'storageKey', 'storageRegion']);
 const DOWNLOAD_URL_METADATA_FIELDS = DOWNLOAD_METADATA_FIELDS.filter(
   (field) => !STORAGE_LOCATION_FIELDS.has(field),
