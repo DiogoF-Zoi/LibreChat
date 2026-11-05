@@ -74,6 +74,12 @@ jest.mock('~/config', () => ({
 const { processDeleteRequest } = require('~/server/services/Files/process');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
 const { createCodeExecutionRouteKey } = require('@librechat/api');
+const { logger: dataSchemasLogger } = require('@librechat/data-schemas');
+
+const signedDownload = {
+  url: 'https://cdn.example.com/file.pdf?signed',
+  expiresAt: new Date('2026-10-23T11:00:00.000Z'),
+};
 
 // Import the router after mocks
 const router = require('./files');
@@ -1013,7 +1019,7 @@ describe('File Routes - Delete with Agent Access', () => {
   describe('GET /files/download-url/:userId/:file_id', () => {
     it('returns a direct signed download URL when the strategy supports it', async () => {
       const userFileId = uuidv4();
-      const getDownloadURL = jest.fn().mockResolvedValue('https://cdn.example.com/file.pdf?signed');
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
       getStrategyFunctions.mockReturnValue({ getDownloadURL });
 
       await createFile({
@@ -1034,6 +1040,7 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.status).toBe(200);
       expect(response.body).toMatchObject({
         url: 'https://cdn.example.com/file.pdf?signed',
+        expiresAt: '2026-10-23T11:00:00.000Z',
         filename: 'file.pdf',
         type: 'application/pdf',
       });
@@ -1041,11 +1048,13 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.body.metadata).toMatchObject({
         file_id: userFileId,
         filename: 'file.pdf',
-        filepath: 'uploads/user/file.pdf',
-        storageKey: 'r/us-east-2/uploads/user/file.pdf',
-        storageRegion: 'us-east-2',
+        bytes: 200,
+        type: 'application/pdf',
         source: FileSources.s3,
       });
+      expect(response.body.metadata).not.toHaveProperty('filepath');
+      expect(response.body.metadata).not.toHaveProperty('storageKey');
+      expect(response.body.metadata).not.toHaveProperty('storageRegion');
       expect(response.body.metadata).not.toHaveProperty('_id');
       expect(response.body.metadata).not.toHaveProperty('__v');
       expect(response.body.metadata).not.toHaveProperty('user');
@@ -1079,9 +1088,113 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.status).toBe(501);
     });
 
+    it('passes fileConfig.downloadUrlExpiry to the strategy', async () => {
+      const userFileId = uuidv4();
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
+      getStrategyFunctions.mockReturnValue({ getDownloadURL });
+      requestConfig = { fileConfig: { downloadUrlExpiry: 900 } };
+
+      await createFile({
+        user: otherUserId,
+        file_id: userFileId,
+        filename: 'file.pdf',
+        filepath: 'uploads/user/file.pdf',
+        bytes: 200,
+        type: 'application/pdf',
+        source: FileSources.s3,
+      });
+
+      const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
+
+      expect(response.status).toBe(200);
+      expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 900 }));
+    });
+
+    it('defaults the strategy expiry to 300 seconds when downloadUrlExpiry is unset', async () => {
+      const userFileId = uuidv4();
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
+      getStrategyFunctions.mockReturnValue({ getDownloadURL });
+
+      await createFile({
+        user: otherUserId,
+        file_id: userFileId,
+        filename: 'file.pdf',
+        filepath: 'uploads/user/file.pdf',
+        bytes: 200,
+        type: 'application/pdf',
+        source: FileSources.s3,
+      });
+
+      const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
+
+      expect(response.status).toBe(200);
+      expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 300 }));
+    });
+
+    it('never asks a strategy for a lifetime above one hour', async () => {
+      const userFileId = uuidv4();
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
+      getStrategyFunctions.mockReturnValue({ getDownloadURL });
+      /** A config that skipped schema validation (the schema itself rejects this value). */
+      requestConfig = { fileConfig: { downloadUrlExpiry: 7 * 24 * 3600 } };
+
+      await createFile({
+        user: otherUserId,
+        file_id: userFileId,
+        filename: 'file.pdf',
+        filepath: 'uploads/user/file.pdf',
+        bytes: 200,
+        type: 'application/pdf',
+        source: FileSources.s3,
+      });
+
+      const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
+
+      expect(response.status).toBe(200);
+      expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 3600 }));
+    });
+
+    it("denies another user's file before issuing a signed URL", async () => {
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
+      getStrategyFunctions.mockReturnValue({ getDownloadURL });
+
+      const response = await request(app).get(`/files/download-url/${authorId}/${fileId}`);
+
+      expect(response.status).toBe(403);
+      expect(response.body).not.toHaveProperty('url');
+      expect(getDownloadURL).not.toHaveBeenCalled();
+    });
+
+    it('never logs the signed URL', async () => {
+      const userFileId = uuidv4();
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
+      getStrategyFunctions.mockReturnValue({ getDownloadURL });
+      const spies = ['debug', 'info', 'warn', 'error'].map((level) =>
+        jest.spyOn(dataSchemasLogger, level),
+      );
+
+      await createFile({
+        user: otherUserId,
+        file_id: userFileId,
+        filename: 'file.pdf',
+        filepath: 'uploads/user/file.pdf',
+        bytes: 200,
+        type: 'application/pdf',
+        source: FileSources.s3,
+      });
+
+      const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
+
+      expect(response.status).toBe(200);
+      for (const spy of spies) {
+        expect(JSON.stringify(spy.mock.calls)).not.toContain('cdn.example.com');
+        spy.mockRestore();
+      }
+    });
+
     it('denies tenant-scoped files before issuing a signed URL', async () => {
       const userFileId = uuidv4();
-      const getDownloadURL = jest.fn().mockResolvedValue('https://cdn.example.com/file.pdf?signed');
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
       getStrategyFunctions.mockReturnValue({ getDownloadURL });
 
       await tenantStorage.run({ tenantId: 'tenant-a' }, async () =>
@@ -1130,7 +1243,7 @@ describe('File Routes - Delete with Agent Access', () => {
   describe('GET /files/download/:userId/:file_id', () => {
     it('streams proxied downloads by default when a direct URL is available', async () => {
       const userFileId = uuidv4();
-      const getDownloadURL = jest.fn().mockResolvedValue('https://cdn.example.com/file.pdf?signed');
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
       const getDownloadStream = jest.fn().mockResolvedValue(Readable.from(['file content']));
       getStrategyFunctions.mockReturnValue({ getDownloadURL, getDownloadStream });
 
@@ -1175,7 +1288,7 @@ describe('File Routes - Delete with Agent Access', () => {
 
     it('redirects to a direct signed download URL when explicitly requested', async () => {
       const userFileId = uuidv4();
-      const getDownloadURL = jest.fn().mockResolvedValue('https://cdn.example.com/file.pdf?signed');
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
       const getDownloadStream = jest.fn();
       getStrategyFunctions.mockReturnValue({ getDownloadURL, getDownloadStream });
 
@@ -1198,6 +1311,32 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.headers['x-file-metadata']).toBeUndefined();
       expect(response.headers['cache-control']).toBe('no-store');
       expect(getDownloadStream).not.toHaveBeenCalled();
+    });
+
+    it('streams a local file even when direct=true, without minting a proxy URL', async () => {
+      const userFileId = uuidv4();
+      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
+      const getDownloadStream = jest.fn().mockResolvedValue(Readable.from(['file content']));
+      getStrategyFunctions.mockReturnValue({ getDownloadURL, getDownloadStream });
+
+      await createFile({
+        user: otherUserId,
+        file_id: userFileId,
+        filename: 'file.pdf',
+        filepath: '/uploads/user/file.pdf',
+        bytes: 200,
+        type: 'application/pdf',
+        source: FileSources.local,
+      });
+
+      const response = await request(app).get(
+        `/files/download/${otherUserId}/${userFileId}?direct=true`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.toString()).toBe('file content');
+      expect(response.headers.location).toBeUndefined();
+      expect(getDownloadURL).not.toHaveBeenCalled();
     });
 
     it('falls back to streaming when direct URL generation fails', async () => {

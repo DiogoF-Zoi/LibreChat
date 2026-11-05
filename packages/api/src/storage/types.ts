@@ -63,6 +63,13 @@ export interface DownloadURLParams {
   file: TFile;
   customFilename?: string | null;
   contentType?: string | null;
+  /** Requested lifetime in seconds; strategies with their own expiry config may ignore it. */
+  expiresIn?: number;
+}
+
+export interface DownloadURLResult {
+  url: string;
+  expiresAt: Date;
 }
 
 export interface UploadImageParams extends UploadFileParams {

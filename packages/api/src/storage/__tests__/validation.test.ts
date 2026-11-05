@@ -1,8 +1,4 @@
-import {
-  assertS3FileName,
-  assertPathSegment,
-  sanitizeContentDispositionFilename,
-} from '../validation';
+import { assertS3FileName, assertPathSegment } from '../validation';
 
 describe('assertPathSegment', () => {
   it('returns safe single path segments', () => {
@@ -49,21 +45,5 @@ describe('assertS3FileName', () => {
     expect(() => assertS3FileName('fileName', 'report\u0000.csv', 'test')).toThrow(
       'contains unsafe path characters',
     );
-  });
-});
-
-describe('sanitizeContentDispositionFilename', () => {
-  it('strips quoted-string and header separator characters', () => {
-    expect(sanitizeContentDispositionFilename('report";\\\r\nbad.pdf')).toBe('reportbad.pdf');
-  });
-
-  it('strips all ASCII control characters from header filenames', () => {
-    expect(sanitizeContentDispositionFilename('report\u0000\t\u001fbad\u007f.pdf')).toBe(
-      'reportbad.pdf',
-    );
-  });
-
-  it('returns a safe fallback when all filename characters are stripped', () => {
-    expect(sanitizeContentDispositionFilename('";\\\r\n')).toBe('download');
   });
 });
