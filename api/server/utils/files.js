@@ -1,4 +1,5 @@
 const sharp = require('sharp');
+const { formatContentDisposition } = require('@librechat/api');
 
 /**
  * Determines the file type of a buffer
@@ -64,28 +65,13 @@ const cleanFileName = (fileName) => {
   return cleaned;
 };
 
-const encodeRFC5987ValueChars = (value) =>
-  encodeURIComponent(value).replace(
-    /['()*]/g,
-    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
-
-const getAsciiFilenameFallback = (fileName) => {
-  const fallback = fileName
-    .normalize('NFKD')
-    .replace(/[^\x20-\x7e]/g, '_')
-    .replace(/["\\\r\n]/g, '_');
-
-  return fallback || 'download';
-};
-
-const getContentDisposition = (fileName, disposition = 'attachment') => {
-  const cleanedFilename = cleanFileName(fileName) || 'download';
-  const asciiFallback = getAsciiFilenameFallback(cleanedFilename);
-  const encodedFilename = encodeRFC5987ValueChars(cleanedFilename);
-
-  return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encodedFilename}`;
-};
+/**
+ * @param {string} fileName
+ * @param {'attachment' | 'inline'} [disposition='attachment']
+ * @returns {string}
+ */
+const getContentDisposition = (fileName, disposition = 'attachment') =>
+  formatContentDisposition(cleanFileName(fileName), disposition);
 
 module.exports = {
   determineFileType,

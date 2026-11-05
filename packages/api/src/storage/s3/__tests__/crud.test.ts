@@ -58,6 +58,9 @@ describe('S3 CRUD', () => {
     process.env.AWS_REGION = 'us-east-1';
     process.env.AWS_BUCKET_NAME = 'test-bucket';
     process.env.S3_URL_EXPIRY_SECONDS = '120';
+    /** Static keys carry no expiration, so download URL expiry is the requested lifetime. */
+    process.env.AWS_ACCESS_KEY_ID = 'AKIATESTTESTTESTTEST';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-access-key';
   });
 
   afterAll(() => {
@@ -514,7 +517,7 @@ describe('S3 CRUD', () => {
         expect.anything(),
         expect.objectContaining({
           input: expect.objectContaining({
-            ResponseContentDisposition: 'attachment; filename="custom-name.pdf"',
+            ResponseContentDisposition: `attachment; filename="custom-name.pdf"; filename*=UTF-8''custom-name.pdf`,
           }),
         }),
         expect.anything(),
@@ -1299,18 +1302,62 @@ describe('S3 CRUD', () => {
         contentType: 'application/pdf',
       });
 
-      expect(result).toContain('signed=true');
+      expect(result.url).toContain('signed=true');
       expect(getSignedUrl).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
           input: expect.objectContaining({
             Key: 't/tenantA/uploads/user123/file.pdf',
-            ResponseContentDisposition: 'attachment; filename="downloadbad.pdf"',
+            ResponseContentDisposition: `attachment; filename="download_;_bad.pdf"; filename*=UTF-8''download%22%3B%5Cbad.pdf`,
             ResponseContentType: 'application/pdf',
           }),
         }),
         expect.anything(),
       );
+    });
+
+    it('signs a GetObject for the exact bucket and key with the default expiry', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-23T10:00:00.000Z') });
+      try {
+        const { getS3DownloadURL } = await import('../crud');
+        const result = await getS3DownloadURL({
+          file: { filepath: 'https://bucket.s3.amazonaws.com/uploads/user123/a.pdf' } as TFile,
+        });
+
+        const [, command, options] = (getSignedUrl as jest.Mock).mock.calls[0];
+        expect(command).toBeInstanceOf(GetObjectCommand);
+        expect(command.input).toEqual(
+          expect.objectContaining({ Bucket: 'test-bucket', Key: 'uploads/user123/a.pdf' }),
+        );
+        expect(options).toEqual({ expiresIn: 120 });
+        expect(result.expiresAt.toISOString()).toBe('2026-10-23T10:02:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('honors a caller-provided expiresIn', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-23T10:00:00.000Z') });
+      try {
+        const { getS3DownloadURL } = await import('../crud');
+        const result = await getS3DownloadURL({
+          file: { filepath: 'https://bucket.s3.amazonaws.com/uploads/user123/a.pdf' } as TFile,
+          expiresIn: 900,
+        });
+
+        expect(getSignedUrl).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
+          expiresIn: 900,
+        });
+        expect(result.expiresAt.toISOString()).toBe('2026-10-23T10:15:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('throws without signing when the file has no resolvable key', async () => {
+      const { getS3DownloadURL } = await import('../crud');
+      await expect(getS3DownloadURL({ file: { filepath: '' } as TFile })).rejects.toThrow();
+      expect(getSignedUrl).not.toHaveBeenCalled();
     });
 
     it('prefers storageKey when present', async () => {
