@@ -7,6 +7,7 @@ const {
   stripCacheBust,
   writeLocalFile,
   assertRemoteFileURL,
+  getSignedDownloadURL,
   getRemoteFileFetchMaxBytes,
   getRemoteFileFetchTimeoutMs,
   assertRemoteFileContentLength,
@@ -213,6 +214,13 @@ async function getLocalFileStream(req, requestedFilepath) {
   }
 }
 
+const getLocalDownloadURL = (params) =>
+  getSignedDownloadURL({
+    ...params,
+    secret: process.env.JWT_SECRET,
+    baseURL: process.env.DOMAIN_SERVER,
+  });
+
 module.exports = {
   saveLocalBuffer,
   saveFileFromURL,
@@ -220,4 +228,5 @@ module.exports = {
   deleteLocalFile,
   uploadLocalFile,
   getLocalFileStream,
+  getLocalDownloadURL,
 };

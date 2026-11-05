@@ -56,21 +56,3 @@ export function assertS3FileName(
 
   return fileName;
 }
-
-export function sanitizeContentDispositionFilename(filename: string): string {
-  let sanitized = '';
-  for (const character of filename) {
-    const code = character.charCodeAt(0);
-    if (
-      character === '"' ||
-      character === '\\' ||
-      character === ';' ||
-      code <= 31 ||
-      code === 127
-    ) {
-      continue;
-    }
-    sanitized += character;
-  }
-  return sanitized || 'download';
-}

@@ -661,6 +661,10 @@ const skillFileConfigSchema = z.object({
   deletionCleanupConcurrency: z.number().int().positive().optional(),
 });
 
+export const DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS = 300;
+/** Ceiling on signed download URL lifetime, since the URL is a bearer credential. */
+export const MAX_DOWNLOAD_URL_EXPIRY_SECONDS = 3600;
+
 export const fileConfigSchema = z.object({
   /** Enable only after every replica and rollback target reads retained file destinations. */
   retainedFileCleanup: z.boolean().optional(),
@@ -678,6 +682,7 @@ export const fileConfigSchema = z.object({
   fileContextCharLimit: z.number().min(0).optional(),
   codeEnvLivenessSafeWindowMs: z.number().min(0).optional(),
   legacySearchProbeTimeoutMs: z.number().min(1).optional(),
+  downloadUrlExpiry: z.number().int().positive().max(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).optional(),
   imageGeneration: z
     .object({
       percentage: z.number().min(0).max(100).optional(),

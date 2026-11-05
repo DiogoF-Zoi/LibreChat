@@ -26,6 +26,7 @@ const {
   recordShareLinkRejection,
   traceIdForMessage,
   resolveDownloadPath,
+  isDirectDownloadSource,
   prepareResultToolCallPreviews,
 } = require('@librechat/api');
 const {
@@ -281,10 +282,9 @@ const streamSharedFile = async (req, res, file, requestedDisposition) => {
 
   // Redirect to a signed storage URL only when explicitly requested (?direct=true);
   // by default stream through the server so blob (XHR) callers work without bucket CORS.
-  const isDirectSource = source === FileSources.s3 || source === FileSources.cloudfront;
-  if (req.query.direct === 'true' && getDownloadURL && isDirectSource) {
+  if (req.query.direct === 'true' && getDownloadURL && isDirectDownloadSource(source)) {
     try {
-      const url = await getDownloadURL({
+      const { url } = await getDownloadURL({
         req,
         file,
         customFilename: cleanFileName(file.filename),

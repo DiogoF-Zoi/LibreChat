@@ -41,6 +41,7 @@ const {
   prepareImagesLocal,
   processLocalAvatar,
   getLocalFileStream,
+  getLocalDownloadURL,
 } = require('./Local');
 const { resizeImageBuffer } = require('./images/resize');
 const { updateUser, updateFile } = require('~/models');
@@ -105,6 +106,7 @@ const localStrategy = () => ({
   handleImageUpload: uploadLocalImage,
   prepareImagePayload: prepareImagesLocal,
   getDownloadStream: getLocalFileStream,
+  getDownloadURL: getLocalDownloadURL,
 });
 
 /**

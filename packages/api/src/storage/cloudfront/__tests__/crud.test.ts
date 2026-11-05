@@ -278,8 +278,9 @@ describe('CloudFront CRUD', () => {
 
       const { dateLessThan } = mockGetSignedUrl.mock.calls[0][0] as { dateLessThan: string };
       const expiry = new Date(dateLessThan).getTime();
-      expect(expiry).toBeGreaterThanOrEqual(before + 7200 * 1000);
-      expect(expiry).toBeLessThanOrEqual(after + 7200 * 1000 + 100);
+      expect(expiry % 1000).toBe(0);
+      expect(expiry).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000 + 7200 * 1000);
+      expect(expiry).toBeLessThanOrEqual(after + 7200 * 1000);
     });
 
     it('falls back to s3Config expiry when urlExpiry not set', async () => {
@@ -295,8 +296,9 @@ describe('CloudFront CRUD', () => {
       const { dateLessThan } = mockGetSignedUrl.mock.calls[0][0] as { dateLessThan: string };
       const expiry = new Date(dateLessThan).getTime();
       // 900s fallback from mocked s3Config
-      expect(expiry).toBeGreaterThanOrEqual(before + 900 * 1000);
-      expect(expiry).toBeLessThanOrEqual(after + 900 * 1000 + 100);
+      expect(expiry % 1000).toBe(0);
+      expect(expiry).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000 + 900 * 1000);
+      expect(expiry).toBeLessThanOrEqual(after + 900 * 1000);
     });
 
     it('throws when CloudFront is not initialized', async () => {
@@ -865,18 +867,24 @@ describe('CloudFront CRUD', () => {
         } as TFile,
       });
 
-      expect(result).toContain('Policy=abc');
+      expect(result.url).toContain('Policy=abc');
+      expect(result.expiresAt).toBeInstanceOf(Date);
       expect(mockResolveStoredS3Key).toHaveBeenCalledWith(
         expect.objectContaining({
           filepath: 'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
         }),
       );
+      const signingInput = mockGetSignedUrl.mock.calls[0][0] as { url: string; policy: string };
+      const signedUrl = new URL(signingInput.url);
+      expect(`${signedUrl.origin}${signedUrl.pathname}`).toBe(
+        'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
+      );
+      expect(signedUrl.searchParams.get('response-content-disposition')).toBe(
+        `attachment; filename="download"; filename*=UTF-8''download`,
+      );
+      expect(signingInput.policy).toContain('doc.pdf?*');
       expect(mockGetSignedUrl).toHaveBeenCalledWith(
-        expect.objectContaining({
-          url: 'https://d123.cloudfront.net/t/tenantA/uploads/user1/doc.pdf',
-          keyPairId: 'K123',
-          privateKey: 'pk-secret',
-        }),
+        expect.objectContaining({ keyPairId: 'K123', privateKey: 'pk-secret' }),
       );
     });
 
@@ -894,10 +902,10 @@ describe('CloudFront CRUD', () => {
         contentType: 'application/pdf',
       });
 
-      expect(result).toBe('signed-url');
+      expect(result.url).toBe('signed-url');
       const signedInputUrl = new URL((mockGetSignedUrl.mock.calls[0][0] as { url: string }).url);
       expect(signedInputUrl.searchParams.get('response-content-disposition')).toBe(
-        'attachment; filename="reportbad.pdf"',
+        `attachment; filename="report_;_bad.pdf"; filename*=UTF-8''report%22%3B%5Cbad.pdf`,
       );
       expect(mockGetSignedUrl).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -919,9 +927,49 @@ describe('CloudFront CRUD', () => {
       expect(policy.Statement[0].Resource).toBe(
         'https://d123.cloudfront.net/uploads/user1/report.pdf?*',
       );
-      expect(policy.Statement[0].Condition.DateLessThan['AWS:EpochTime']).toEqual(
-        expect.any(Number),
+      expect(policy.Statement[0].Condition.DateLessThan['AWS:EpochTime']).toBe(
+        Math.floor(result.expiresAt.getTime() / 1000),
       );
+    });
+
+    it('uses the requested expiresIn instead of cloudfront.urlExpiry', async () => {
+      mockGetCloudFrontConfig.mockReturnValue(
+        makeConfig({ privateKey: 'pk', keyPairId: 'K1', urlExpiry: 7200 }),
+      );
+      mockResolveStoredS3Key.mockReturnValue('uploads/user1/doc.pdf');
+      mockGetSignedUrl.mockReturnValue('signed-url');
+
+      const { getCloudFrontDownloadURL } = await import('~/storage/cloudfront/crud');
+      const before = Date.now();
+      const result = await getCloudFrontDownloadURL({
+        file: { filepath: 'https://d123.cloudfront.net/uploads/user1/doc.pdf' } as TFile,
+        expiresIn: 300,
+      });
+
+      const lifetimeMs = result.expiresAt.getTime() - before;
+      expect(lifetimeMs).toBeGreaterThan(299_000);
+      expect(lifetimeMs).toBeLessThanOrEqual(300_000);
+      const input = mockGetSignedUrl.mock.calls[0][0] as { policy: string };
+      const epoch = JSON.parse(input.policy).Statement[0].Condition.DateLessThan['AWS:EpochTime'];
+      expect(epoch * 1000).toBe(result.expiresAt.getTime());
+    });
+
+    it('falls back to cloudfront.urlExpiry when no expiresIn is requested', async () => {
+      mockGetCloudFrontConfig.mockReturnValue(
+        makeConfig({ privateKey: 'pk', keyPairId: 'K1', urlExpiry: 7200 }),
+      );
+      mockResolveStoredS3Key.mockReturnValue('uploads/user1/doc.pdf');
+      mockGetSignedUrl.mockReturnValue('signed-url');
+
+      const { getCloudFrontDownloadURL } = await import('~/storage/cloudfront/crud');
+      const before = Date.now();
+      const result = await getCloudFrontDownloadURL({
+        file: { filepath: 'https://d123.cloudfront.net/uploads/user1/doc.pdf' } as TFile,
+      });
+
+      const lifetimeMs = result.expiresAt.getTime() - before;
+      expect(lifetimeMs).toBeGreaterThan(7_199_000);
+      expect(lifetimeMs).toBeLessThanOrEqual(7_200_000);
     });
 
     it('throws when signing keys are missing', async () => {
