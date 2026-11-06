@@ -884,12 +884,52 @@ describe('MCP_USER_INPUT_FIELDS', () => {
     expect(MCP_USER_INPUT_FIELDS.has('oauth_headers')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('oauthPrompt')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('oauthToolCatalog')).toBe(false);
+    expect(MCP_USER_INPUT_FIELDS.has('attachmentUrls')).toBe(false);
 
     // Stdio is intentionally excluded from MCPServerUserInputSchema (security
     // posture), so its transport-only fields should not be in the set either.
     expect(MCP_USER_INPUT_FIELDS.has('command')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('args')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('env')).toBe(false);
+  });
+});
+
+describe('attachmentUrls', () => {
+  const server = { type: 'streamable-http', url: 'https://excel-mcp.example.com/mcp' };
+
+  it('is off unless configured', () => {
+    expect(MCPOptionsSchema.parse(server).attachmentUrls).toBeUndefined();
+  });
+
+  it('accepts MIME policies, normalized to lowercase, with lifetimes', () => {
+    const parsed = MCPOptionsSchema.parse({
+      ...server,
+      attachmentUrls: { mimeTypes: ['Text/CSV', 'application/*'], expiry: 900, minTtl: 120 },
+    });
+    expect(parsed.attachmentUrls).toEqual({
+      mimeTypes: ['text/csv', 'application/*'],
+      expiry: 900,
+      minTtl: 120,
+    });
+    expect(MCPOptionsSchema.parse({ ...server, attachmentUrls: {} }).attachmentUrls).toEqual({});
+  });
+
+  it.each([
+    ['a lifetime above the download URL cap', { expiry: 3601 }],
+    ['a minimum lifetime longer than the URL lifetime', { expiry: 60, minTtl: 61 }],
+    ['a malformed MIME type', { mimeTypes: ['*/*'] }],
+    ['an empty MIME list', { mimeTypes: [] }],
+    ['unknown keys', { urls: true }],
+  ])('rejects %s', (_label, attachmentUrls) => {
+    expect(MCPOptionsSchema.safeParse({ ...server, attachmentUrls }).success).toBe(false);
+  });
+
+  it('cannot be enabled from user input', () => {
+    const result = MCPServerUserInputSchema.safeParse({
+      ...server,
+      attachmentUrls: { mimeTypes: ['text/csv'] },
+    });
+    expect(result.success && 'attachmentUrls' in result.data).toBe(false);
   });
 });
 
