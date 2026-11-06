@@ -764,6 +764,20 @@ actions:
 #     # a `{{LIBRECHAT_BODY_*}}` placeholder here no longer hides the server's tool list.
 #     requestHeaders:
 #       X-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+#   excel:
+#     type: streamable-http
+#     url: https://excel-mcp.example.com/mcp
+#     # Lets this server's tools read the files a user attaches to the current message. The model
+#     # sees `attachment://…` references; each is swapped for a freshly signed download URL only in
+#     # the outbound tool call, so URLs never reach the model, traces or stored messages. Files must
+#     # be stored where a download URL can be signed (local, S3, CloudFront). For local storage the
+#     # server must reach DOMAIN_SERVER. Only librechat.yaml can enable this; user-created servers cannot.
+#     attachmentUrls:
+#       mimeTypes: # exact or `type/*`; omit to offer every signable file
+#         - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+#         - application/vnd.ms-excel
+#       expiry: 300 # seconds; defaults to fileConfig.downloadUrlExpiry, capped at 3600
+#       minTtl: 60 # seconds a URL must have left when handed to the server
 #   puppeteer:
 #     type: stdio
 #     command: npx

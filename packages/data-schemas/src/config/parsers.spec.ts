@@ -779,6 +779,46 @@ describe('redactMessage', () => {
     );
   });
 
+  describe('signed download URLs', () => {
+    const local =
+      'https://chat.example.test/api/files/signed/65f1c0ffee0123456789abcd?expires=1762340000&signature=bG9jYWwtaG1hYy1zaWduYXR1cmUtY2FuYXJ5LXZhbHVlLXg';
+    const s3 =
+      'https://bucket.s3.eu-central-1.amazonaws.com/uploads/u/f__report.xlsx?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIACANARY%2F20261105%2Feu-central-1%2Fs3%2Faws4_request&X-Amz-Date=20261105T103000Z&X-Amz-Expires=300&X-Amz-Security-Token=sts-canary&X-Amz-Signature=sigv4canary&X-Amz-SignedHeaders=host';
+    const cloudfront =
+      'https://cdn.example.test/uploads/report.xlsx?Expires=1762340000&Signature=cloudfront~canary_sig&Key-Pair-Id=K2CANARY';
+    const canaries = [
+      'bG9jYWwtaG1hYy1zaWduYXR1cmUtY2FuYXJ5LXZhbHVlLXg',
+      'AKIACANARY',
+      'sts-canary',
+      'sigv4canary',
+      'cloudfront~canary_sig',
+    ];
+
+    it.each([
+      ['local', local],
+      ['S3', s3],
+      ['CloudFront', cloudfront],
+    ])('strips the %s signature and credentials but keeps the target', (_name, url) => {
+      const redacted = redactMessage(`download failed for ${url}`);
+      for (const canary of canaries) {
+        expect(redacted).not.toContain(canary);
+      }
+      expect(redacted).toContain(url.slice(0, url.indexOf('?')));
+    });
+
+    it('strips them from structured log metadata', () => {
+      const info = runRedactFormat({
+        level: 'debug',
+        message: 'tool call',
+        args: { file_urls: [local, s3, cloudfront] },
+      });
+      const serialized = JSON.stringify(info);
+      for (const canary of canaries) {
+        expect(serialized).not.toContain(canary);
+      }
+    });
+  });
+
   it('redacts OAuth secrets in JSON-formatted strings', () => {
     const message =
       'oauth failed: {"refresh_token":"refresh-json-canary","client_secret": "client-json-canary","client_assertion":"assertion-json-canary","code":"code-json-canary","safe":"visible"}';

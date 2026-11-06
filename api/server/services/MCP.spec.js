@@ -1709,6 +1709,103 @@ describe('User parameter passing tests', () => {
       ).resolves.toBe('ordinary output');
     });
 
+    describe('attachment references', () => {
+      const { FileSources } = require('librechat-data-provider');
+      const { createMCPAttachmentRefs, MCP_ATTACHMENT_REFS_KEY } = require('@librechat/api');
+      const user = { id: 'attachment-user', role: 'USER' };
+      const signedURL = 'https://chat.example.test/api/files/signed/abc?expires=1&signature=sekret';
+      const availableTools = {
+        [`inspect_workbook${D}excel`]: {
+          function: {
+            description: 'Load workbooks',
+            parameters: {
+              type: 'object',
+              properties: { file_urls: { type: 'array', items: { type: 'string' } } },
+            },
+          },
+        },
+      };
+      const refs = () =>
+        createMCPAttachmentRefs({
+          files: [
+            {
+              _id: '65f1c0ffee0123456789abcd',
+              user: user.id,
+              file_id: 'file-1',
+              filename: 'Q3.xlsx',
+              type: 'text/csv',
+              source: FileSources.local,
+            },
+          ],
+          requestFileIds: ['file-1'],
+          owner: { userId: user.id },
+          getStrategyFunctions: () => ({
+            getDownloadURL: async () => ({
+              url: signedURL,
+              expiresAt: new Date(Date.now() + 300_000),
+            }),
+          }),
+          getServerConfig: async () => ({}),
+          nonce: 'n0nce000',
+        });
+      const invoke = async (serverConfig, configurableRefs) => {
+        require('~/models').getRoleByName.mockResolvedValue({
+          permissions: { [PermissionTypes.MCP_SERVERS]: { [Permissions.USE]: true } },
+        });
+        const callTool = jest.fn(async ({ toolArguments }) => [
+          `loaded ${toolArguments.file_urls[0]}`,
+          undefined,
+        ]);
+        mockGetMCPManager.mockReturnValue({ callTool });
+        const tool = await createMCPTool({
+          res: { write: jest.fn(), flush: jest.fn() },
+          user,
+          config: {
+            type: 'streamable-http',
+            url: 'https://excel.example.com/mcp',
+            ...serverConfig,
+          },
+          toolKey: `inspect_workbook${D}excel`,
+          provider: 'openai',
+          userMCPAuthMap: {},
+          availableTools,
+        });
+        const args = { file_urls: ['attachment://n0nce000/1'] };
+        const output = await tool.invoke(args, {
+          configurable: { user, [MCP_ATTACHMENT_REFS_KEY]: configurableRefs },
+          metadata: { provider: 'openai', thread_id: 'thread-1', run_id: 'run-1' },
+          toolCall: {},
+        });
+        return { args, output, callTool };
+      };
+
+      it('sends a signed URL to an opted-in server and returns only the reference', async () => {
+        const { args, output, callTool } = await invoke({ attachmentUrls: {} }, refs());
+
+        expect(callTool.mock.calls[0][0].toolArguments).toEqual({ file_urls: [signedURL] });
+        expect(args).toEqual({ file_urls: ['attachment://n0nce000/1'] });
+        expect(output).toBe('loaded attachment://n0nce000/1');
+      });
+
+      it('passes references through untouched to servers that did not opt in', async () => {
+        const { callTool } = await invoke({}, refs());
+
+        expect(callTool.mock.calls[0][0].toolArguments).toEqual({
+          file_urls: ['attachment://n0nce000/1'],
+        });
+      });
+
+      it('fails the call with a model-safe message when the turn has no references', async () => {
+        const { output, callTool } = await invoke({ attachmentUrls: {} }, undefined).catch(
+          (error) => ({ output: error.message, callTool: null }),
+        );
+
+        expect(callTool?.mock.calls ?? []).toHaveLength(0);
+        expect(String(output)).toContain('is not available in this turn');
+        expect(String(output)).not.toContain('signature');
+      });
+    });
+
     it('records a typed OBO failure against the scheduled generation before returning an error', async () => {
       const user = { id: 'scheduled-owner', role: 'USER' };
       const missing = new Error('Unattended provider not configured');

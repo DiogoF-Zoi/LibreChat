@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Constants } from 'librechat-data-provider';
+import { Constants, FileSources } from 'librechat-data-provider';
 import { DynamicStructuredTool } from '@librechat/agents/langchain/tools';
 import type { Logger } from 'winston';
 import type { MCPManager } from '~/mcp/MCPManager';
@@ -11,6 +11,7 @@ import {
   buildAgentAdditionalInstructions,
   applyContextToAgent,
 } from './context';
+import { createMCPAttachmentRefs } from '~/mcp/attachments';
 
 // Test schema for DynamicStructuredTool
 const testSchema = z.object({});
@@ -342,6 +343,98 @@ describe('Agent Context Utilities', () => {
       expect(agent.instructions).toBe('Original instructions\n\nMCP instructions');
       expect(agent.additional_instructions).toBe('Shared context');
       expect(mockLogger.debug).toHaveBeenCalledWith('[AgentContext] Applied context to agent');
+    });
+
+    describe('attachment references', () => {
+      const xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const makeRefs = (getServerConfig: (name: string) => Promise<object | undefined>) =>
+        createMCPAttachmentRefs({
+          files: [
+            {
+              _id: '65f1c0ffee0123456789abcd',
+              user: 'user-1',
+              file_id: 'file-1',
+              filename: 'Q3.xlsx',
+              filepath: '/uploads/user-1/file-1__Q3.xlsx',
+              type: xlsx,
+              bytes: 1,
+              embedded: false,
+              object: 'file',
+              usage: 0,
+              source: FileSources.local,
+            },
+          ],
+          requestFileIds: ['file-1'],
+          owner: { userId: 'user-1' },
+          getStrategyFunctions: () => ({ getDownloadURL: jest.fn() }),
+          getServerConfig,
+          nonce: 'n0nce000',
+        });
+      const excelAgent = (): AgentWithTools => ({
+        id: 'test-agent',
+        tools: [
+          new DynamicStructuredTool({
+            name: `inspect_workbook${Constants.mcp_delimiter}excel`,
+            description: 'Test tool',
+            schema: testSchema,
+            func: async () => 'result',
+          }),
+        ],
+      });
+
+      it('appends the reference list to the dynamic tail for accepting servers', async () => {
+        const agent = excelAgent();
+        mockMCPManager.formatInstructionsForContext.mockResolvedValue('MCP instructions');
+
+        await applyContextToAgent({
+          agent,
+          sharedRunContext: 'Shared context',
+          mcpManager: mockMCPManager,
+          logger: mockLogger,
+          attachmentRefs: makeRefs(async () => ({ attachmentUrls: {} })),
+        });
+
+        expect(agent.instructions).toBe('MCP instructions');
+        expect(agent.additional_instructions).toMatch(/^Shared context\n\n# Attached Files\n/);
+        expect(agent.additional_instructions).toContain(
+          `- attachment://n0nce000/1: "Q3.xlsx" (${xlsx}); accepted by: excel`,
+        );
+      });
+
+      it('adds nothing when the agent has no accepting server', async () => {
+        const agent = excelAgent();
+        mockMCPManager.formatInstructionsForContext.mockResolvedValue('');
+
+        await applyContextToAgent({
+          agent,
+          sharedRunContext: 'Shared context',
+          mcpManager: mockMCPManager,
+          attachmentRefs: makeRefs(async () => ({})),
+        });
+
+        expect(agent.additional_instructions).toBe('Shared context');
+      });
+
+      it('keeps MCP instructions when the server lookup fails', async () => {
+        const agent = excelAgent();
+        mockMCPManager.formatInstructionsForContext.mockResolvedValue('MCP instructions');
+
+        await applyContextToAgent({
+          agent,
+          sharedRunContext: 'Shared context',
+          mcpManager: mockMCPManager,
+          logger: mockLogger,
+          attachmentRefs: makeRefs(async () => {
+            throw new Error('registry down');
+          }),
+        });
+
+        expect(agent.instructions).toBe('MCP instructions');
+        expect(agent.additional_instructions).toBe('Shared context');
+        expect(mockLogger.error).toHaveBeenCalledWith(
+          '[AgentContext] Failed to list attachment references',
+        );
+      });
     });
 
     it('should use ephemeral agent MCP servers when provided', async () => {

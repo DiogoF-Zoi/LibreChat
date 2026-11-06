@@ -57,6 +57,8 @@ const {
   getMCPUserConnectionPoolKey,
   bindScheduledMCPInvocation,
   ScheduledMCPPolicyError,
+  callWithMCPAttachments,
+  MCP_ATTACHMENT_REFS_KEY,
 } = require('@librechat/api');
 const {
   Time,
@@ -1393,52 +1395,59 @@ function createToolInstance({
        * is required for OBO since the grant sends the access token to the IdP
        * as the jwt-bearer assertion.
        */
-      const result = await mcpManager.callTool({
-        scheduledBearerInvocation,
-        scheduledMCPInvocation,
-        serverName,
+      const callToolWith = (resolvedArguments) =>
+        mcpManager.callTool({
+          scheduledBearerInvocation,
+          scheduledMCPInvocation,
+          serverName,
+          serverConfig: capturedServerConfig,
+          /** The upstream server never sees stripped names — a key that dropped
+           *  a redundant server-name prefix calls the ORIGINAL tool. */
+          toolName: serverToolName,
+          provider,
+          toolArguments: resolvedArguments,
+          options: {
+            signal: derivedSignal,
+          },
+          user: effectiveUser,
+          requestBody: config?.configurable?.requestBody ?? capturedRequestBody,
+          requestScopedConnections:
+            config?.configurable?.requestScopedConnections ?? capturedRequestScopedConnections,
+          customUserVars,
+          flowManager,
+          tokenMethods: {
+            findToken,
+            createToken,
+            updateToken,
+            deleteTokens,
+          },
+          onOAuthCredentialsChanging: (scope) =>
+            prepareMCPAuthorizationMutation(scope, {
+              invalidateRecoveryGeneration: invalidateCachedTools,
+              persistPublicationRetry: persistMCPAuthorizationFenceRetry,
+              clearPublicationRetry: clearMCPAuthorizationFenceRetry,
+              clearLocalRecovery: (userId, changedServerName) =>
+                mcpManager.clearCatalogRecoveryState?.(userId, changedServerName),
+              retryDelaysMs: recoveryPolicy?.authorizationFenceRetryMs,
+              attemptTimeoutMs: recoveryPolicy?.authorizationFenceTimeoutMs,
+            }),
+          oauthStart,
+          oauthEnd,
+          graphTokenResolver: getGraphApiToken,
+          oboTokenResolver: exchangeOboToken,
+          oboTrustChecker: createOboTrustChecker(),
+          upstreamTokenProvider: capturedUpstreamTokenProvider,
+          upstreamTokenProviderResolver: capturedUpstreamTokenProviderResolver,
+          oboIdentityContext: capturedOboIdentityContext,
+          mcpApps: capturedMCPApps,
+        });
+      /** Swaps this turn's attachment references for signed URLs on servers that opted in. */
+      return await callWithMCPAttachments({
+        refs: config?.configurable?.[MCP_ATTACHMENT_REFS_KEY],
         serverConfig: capturedServerConfig,
-        /** The upstream server never sees stripped names — a key that dropped
-         *  a redundant server-name prefix calls the ORIGINAL tool. */
-        toolName: serverToolName,
-        provider,
         toolArguments,
-        options: {
-          signal: derivedSignal,
-        },
-        user: effectiveUser,
-        requestBody: config?.configurable?.requestBody ?? capturedRequestBody,
-        requestScopedConnections:
-          config?.configurable?.requestScopedConnections ?? capturedRequestScopedConnections,
-        customUserVars,
-        flowManager,
-        tokenMethods: {
-          findToken,
-          createToken,
-          updateToken,
-          deleteTokens,
-        },
-        onOAuthCredentialsChanging: (scope) =>
-          prepareMCPAuthorizationMutation(scope, {
-            invalidateRecoveryGeneration: invalidateCachedTools,
-            persistPublicationRetry: persistMCPAuthorizationFenceRetry,
-            clearPublicationRetry: clearMCPAuthorizationFenceRetry,
-            clearLocalRecovery: (userId, changedServerName) =>
-              mcpManager.clearCatalogRecoveryState?.(userId, changedServerName),
-            retryDelaysMs: recoveryPolicy?.authorizationFenceRetryMs,
-            attemptTimeoutMs: recoveryPolicy?.authorizationFenceTimeoutMs,
-          }),
-        oauthStart,
-        oauthEnd,
-        graphTokenResolver: getGraphApiToken,
-        oboTokenResolver: exchangeOboToken,
-        oboTrustChecker: createOboTrustChecker(),
-        upstreamTokenProvider: capturedUpstreamTokenProvider,
-        upstreamTokenProviderResolver: capturedUpstreamTokenProviderResolver,
-        oboIdentityContext: capturedOboIdentityContext,
-        mcpApps: capturedMCPApps,
+        call: callToolWith,
       });
-      return result;
     } catch (error) {
       /** A user Stop aborts every in-flight call at once, and that rejection is
        *  the cancellation working, so it must not reach error-level operational

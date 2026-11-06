@@ -214,6 +214,8 @@ const {
   getChatProjectContextKey,
   isTemporaryTurn,
   hasEntityEmbeddings,
+  createMCPAttachmentRefs,
+  MCP_ATTACHMENT_REFS_KEY,
 } = require('@librechat/api');
 const {
   Run,
@@ -254,8 +256,9 @@ const {
 const { resolveConfigServers, getAccessibleMcpServerNames } = require('~/server/services/MCP');
 const { getMCPServerTools } = require('~/server/services/Config');
 const { getAccessibleMCPServers } = require('~/server/services/MCP');
+const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+const { getMCPManager, getMCPServersRegistry } = require('~/config');
 const BaseClient = require('~/app/clients/BaseClient');
-const { getMCPManager } = require('~/config');
 const db = require('~/models');
 
 const loadAgent = (params) =>
@@ -3079,6 +3082,22 @@ class AgentClient extends BaseClient {
      */
     const ephemeralAgent = this.options.req.body.ephemeralAgent;
     const mcpManager = getMCPManager();
+    const requestUser = this.options.req.user;
+    /** Read by MCP tool calls through the run's `configurable`; holds records, never URLs. */
+    this.mcpAttachmentRefs = createMCPAttachmentRefs({
+      files: requestAttachments,
+      requestFileIds: (this.options.req.body.files ?? []).map((file) => file?.file_id),
+      owner: { userId: requestUser?.id, tenantId: requestUser?.tenantId },
+      getStrategyFunctions,
+      defaultExpiry: this.options.req.config?.fileConfig?.downloadUrlExpiry,
+      getServerConfig: (serverName) =>
+        getMCPServersRegistry().getServerConfig(
+          serverName,
+          requestUser?.id,
+          configServers,
+          requestUser?.role,
+        ),
+    });
 
     const prepareRuntimeAgent = async (
       { agent, agentId },
@@ -3128,6 +3147,7 @@ class AgentClient extends BaseClient {
         user: this.options.req.user,
         sharedRunContext: agentRunContextParts.filter(Boolean).join('\n\n'),
         ephemeralAgent: agentId === this.options.agent.id ? ephemeralAgent : undefined,
+        attachmentRefs: this.mcpAttachmentRefs,
       });
       if (assertLateBoundContent) {
         assertModelBoundContent({
@@ -4717,6 +4737,7 @@ class AgentClient extends BaseClient {
                 this.options.req.resolvedConversation?.codeWorkspaces,
             }),
           user: createSafeUser(this.options.req.user),
+          [MCP_ATTACHMENT_REFS_KEY]: this.mcpAttachmentRefs,
         },
         recursionLimit: resolveRecursionLimit(agentsEConfig, this.options.agent),
         signal: abortController.signal,

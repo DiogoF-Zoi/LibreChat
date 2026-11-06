@@ -4,6 +4,7 @@ import type { Agent, TEphemeralAgent } from 'librechat-data-provider';
 import type { LCTool } from '@librechat/agents';
 import type { Logger } from 'winston';
 import type { MCPLookupUser, ParsedServerConfig } from '~/mcp/types';
+import type { MCPAttachmentRefs } from '~/mcp/attachments';
 import type { MCPManager } from '~/mcp/MCPManager';
 
 /**
@@ -92,6 +93,23 @@ export async function getMCPInstructionsForServers(
   }
 }
 
+/** Lists the turn's attachment references for the agent's servers that accept them. */
+async function getAttachmentContext(
+  mcpServers: string[],
+  attachmentRefs: MCPAttachmentRefs | undefined,
+  logger?: Logger,
+): Promise<string> {
+  if (!attachmentRefs) {
+    return '';
+  }
+  try {
+    return await attachmentRefs.formatContext(mcpServers);
+  } catch {
+    logger?.error('[AgentContext] Failed to list attachment references');
+    return '';
+  }
+}
+
 /**
  * Builds stable instructions for an agent by combining agent-specific context and MCP context.
  * Order: baseInstructions -> mcpInstructions
@@ -141,6 +159,7 @@ export function buildAgentAdditionalInstructions({
  * @param {string} [params.agentId] - Agent ID for logging
  * @param {Logger} [params.logger] - Optional logger instance
  * @param {MCPLookupUser} [params.user] - The acting user, whose hidden MCP servers contribute no instructions
+ * @param {MCPAttachmentRefs} [params.attachmentRefs] - This turn's attachments, listed for servers that accept them
  * @returns {Promise<void>}
  */
 export async function applyContextToAgent({
@@ -152,6 +171,7 @@ export async function applyContextToAgent({
   logger,
   configServers,
   user,
+  attachmentRefs,
 }: {
   agent: AgentWithTools;
   sharedRunContext: string;
@@ -161,19 +181,17 @@ export async function applyContextToAgent({
   logger?: Logger;
   configServers?: Record<string, ParsedServerConfig>;
   user?: MCPLookupUser;
+  attachmentRefs?: MCPAttachmentRefs;
 }): Promise<void> {
   const baseInstructions = agent.instructions || '';
   const additionalInstructions = agent.additional_instructions || '';
 
   try {
     const mcpServers = ephemeralAgent?.mcp?.length ? ephemeralAgent.mcp : extractMCPServers(agent);
-    const mcpInstructions = await getMCPInstructionsForServers(
-      mcpServers,
-      mcpManager,
-      logger,
-      configServers,
-      user,
-    );
+    const [mcpInstructions, attachmentContext] = await Promise.all([
+      getMCPInstructionsForServers(mcpServers, mcpManager, logger, configServers, user),
+      getAttachmentContext(mcpServers, attachmentRefs, logger),
+    ]);
 
     agent.instructions = buildAgentInstructions({
       baseInstructions,
@@ -181,7 +199,7 @@ export async function applyContextToAgent({
     });
     agent.additional_instructions = buildAgentAdditionalInstructions({
       additionalInstructions,
-      sharedRunContext,
+      sharedRunContext: [sharedRunContext, attachmentContext].filter(Boolean).join('\n\n'),
     });
 
     if (agentId && logger) {

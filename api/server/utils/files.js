@@ -1,5 +1,5 @@
 const sharp = require('sharp');
-const { formatContentDisposition } = require('@librechat/api');
+const { formatContentDisposition, stripFileIdPrefix } = require('@librechat/api');
 
 /**
  * Determines the file type of a buffer
@@ -51,19 +51,7 @@ const getBufferMetadata = async (buffer) => {
  * @param {string} fileName - The filename to clean
  * @returns {string} - The cleaned filename without UUID prefix
  */
-const cleanFileName = (fileName) => {
-  if (!fileName) {
-    return fileName;
-  }
-
-  // Remove UUID pattern: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx__
-  const cleaned = fileName.replace(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__/i,
-    '',
-  );
-
-  return cleaned;
-};
+const cleanFileName = (fileName) => (fileName ? stripFileIdPrefix(fileName) : fileName);
 
 /**
  * @param {string} fileName

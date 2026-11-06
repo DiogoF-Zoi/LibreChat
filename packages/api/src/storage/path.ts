@@ -31,3 +31,10 @@ export function stripCacheBust(filepath: string): string {
   const queryIndex = filepath.indexOf('?');
   return queryIndex === -1 ? filepath : filepath.slice(0, queryIndex);
 }
+
+const FILE_ID_PREFIX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__/i;
+
+/** Removes the `<file_id>__` prefix uploads add to stored names, leaving the name the user chose. */
+export function stripFileIdPrefix(filename: string): string {
+  return filename.replace(FILE_ID_PREFIX, '');
+}
