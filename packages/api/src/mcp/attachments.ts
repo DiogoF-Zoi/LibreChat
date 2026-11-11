@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { MCPAttachmentURLs, TFile } from 'librechat-data-provider';
 import type { FileDownloadURLStrategy } from '~/files/download';
 import { resolveDownloadURLExpiry, resolveFileDownloadURL } from '~/files/download';
+import { isMCPToolResultError, markMCPToolResultError } from './status';
 import { stripFileIdPrefix } from '~/storage/path';
 
 /** Run `configurable` key carrying the turn's references from message building to tool calls. */
@@ -287,7 +288,8 @@ export interface MCPAttachmentCallParams<T> {
  * Runs an MCP tool call with this turn's attachment references swapped for freshly signed URLs.
  * Only servers with `attachmentUrls` get URLs; for others the arguments pass through unchanged.
  * The caller's arguments are not mutated, so stored and streamed tool calls keep the reference,
- * and any minted URL the server echoes back is replaced with its reference before returning.
+ * and any minted URL the server echoes back, in the result or in a thrown error's message, is
+ * replaced with its reference. A result marked as a tool error stays marked on the scrubbed copy.
  */
 export async function callWithMCPAttachments<T>({
   refs,
@@ -314,14 +316,29 @@ export async function callWithMCPAttachments<T>({
       minted.set(ref, await turnRefs.mint(ref, config));
     }),
   );
-  const result = await call(mapStrings(toolArguments, (value) => minted.get(value) ?? value));
   const replacements = [...minted].flatMap(([ref, url]) =>
     urlSpellings(url).map((spelling) => [spelling, ref] as const),
   );
-  return mapStrings(result, (value) =>
+  const scrub = (value: string): string =>
     replacements.reduce(
       (text, [spelling, ref]) => (text.includes(spelling) ? text.split(spelling).join(ref) : text),
       value,
-    ),
-  ) as T;
+    );
+
+  let result: T;
+  try {
+    result = await call(mapStrings(toolArguments, (value) => minted.get(value) ?? value));
+  } catch (error) {
+    /** The tool wrapper hands `error.message` to the model. */
+    if (error instanceof Error) {
+      error.message = scrub(error.message);
+    }
+    throw error;
+  }
+  const scrubbed = mapStrings(result, scrub) as T;
+  /** Error status is tracked by object identity, so the copy has to be marked again. */
+  if (typeof result === 'object' && result !== null && isMCPToolResultError(result)) {
+    return markMCPToolResultError(scrubbed as T & object, true);
+  }
+  return scrubbed;
 }
