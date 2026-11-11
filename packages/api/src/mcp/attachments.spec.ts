@@ -8,6 +8,7 @@ import {
   createMCPAttachmentRefs,
 } from './attachments';
 import { getSignedDownloadURL, verifySignedDownload } from '~/files/signed';
+import { isMCPToolResultError, markMCPToolResultError } from './status';
 
 const SECRET = 'test-jwt-secret';
 const BASE_URL = 'https://chat.example.test';
@@ -300,6 +301,33 @@ describe('callWithMCPAttachments', () => {
     expect(serialized).not.toContain('signature=');
     expect(serialized).not.toContain('/api/files/signed');
     expect(serialized).toContain(REF);
+  });
+
+  it('keeps a failed tool result marked as an error after scrubbing it', async () => {
+    const result = await callWithMCPAttachments({
+      refs: buildRefs(),
+      serverConfig: excel,
+      toolArguments: { file_urls: [REF] },
+      call: async (resolved) => {
+        const url = (resolved as { file_urls: string[] }).file_urls[0];
+        return markMCPToolResultError([`Could not read ${url}`, undefined], true);
+      },
+    });
+    expect(isMCPToolResultError(result)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('signature=');
+  });
+
+  it('scrubs an echoed URL from a thrown error message', async () => {
+    const promise = callWithMCPAttachments({
+      refs: buildRefs(),
+      serverConfig: excel,
+      toolArguments: { file_urls: [REF] },
+      call: async (resolved) => {
+        throw new Error(`Invalid input: ${(resolved as { file_urls: string[] }).file_urls[0]}`);
+      },
+    });
+    await expect(promise).rejects.toThrow(`Invalid input: ${REF}`);
+    await expect(promise).rejects.not.toThrow('signature=');
   });
 
   it('propagates signing failures without exposing them as URLs', async () => {
