@@ -17,7 +17,6 @@ import { isMCPToolResultError, markMCPToolResultError } from './status';
 const SECRET = 'test-jwt-secret';
 const BASE_URL = 'https://chat.example.test';
 const NOW = Date.UTC(2026, 10, 5, 12, 0, 0);
-const NONCE = 'a1b2c3d4';
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const EXCEL_POLICY: MCPAttachmentURLs = { mimeTypes: [XLSX, 'text/csv'] };
 
@@ -54,12 +53,12 @@ const buildRefs = (
     owner: { userId: 'user-1' },
     getStrategyFunctions,
     getServerConfig: async (name) => (name === 'excel' ? { attachmentUrls: EXCEL_POLICY } : {}),
-    nonce: NONCE,
     now: () => NOW,
     ...overrides,
   });
 
-const REF = `attachment://${NONCE}/1`;
+/** The reference the default file is listed under. */
+const REF = buildRefs()!.accepted(EXCEL_POLICY)[0].ref;
 
 beforeEach(() => {
   localSigner.mockClear();
@@ -146,12 +145,56 @@ describe('earlier conversation files', () => {
     const context = await refs!.formatContext(['excel']);
     expect(context).toContain(`- ${REF}: "Q3 Sales.xlsx" (${XLSX}); accepted by: excel`);
     expect(context).toContain(
-      `- attachment://${NONCE}/2: "earlier-5.xlsx" (${XLSX}); from an earlier message; accepted by: excel`,
+      `- ${refFor(context, 'earlier-5.xlsx')}: "earlier-5.xlsx" (${XLSX}); from an earlier message; accepted by: excel`,
     );
     const order = ['earlier-5.xlsx', 'earlier-30.xlsx', 'earlier-60.xlsx'].map((name) =>
       context.indexOf(`"${name}"`),
     );
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it('keeps a file under the same reference when a later turn lists other files first', async () => {
+    const turnOne = buildRefs({
+      files: [],
+      requestFileIds: [],
+      conversationFiles: [earlierFile(2), earlierFile(3)],
+    });
+    const turnTwo = buildRefs({
+      files: [makeFile()],
+      requestFileIds: [makeFile().file_id],
+      conversationFiles: [earlierFile(2), earlierFile(3), earlierFile(9)],
+    });
+    const before = await turnOne!.formatContext(['excel']);
+    const after = await turnTwo!.formatContext(['excel']);
+    expect(refFor(after, 'earlier-2.xlsx')).toBe(refFor(before, 'earlier-2.xlsx'));
+    expect(refFor(after, 'earlier-3.xlsx')).toBe(refFor(before, 'earlier-3.xlsx'));
+    expect(refFor(after, 'earlier-9.xlsx')).not.toBe(refFor(after, 'earlier-2.xlsx'));
+  });
+
+  it('resolves a reference sent by the model in an earlier turn', async () => {
+    const earlier = earlierFile(4);
+    const turnOne = buildRefs({ files: [earlier], requestFileIds: [earlier.file_id] });
+    const stored = refFor(await turnOne!.formatContext(['excel']), 'earlier-4.xlsx');
+
+    const turnTwo = buildRefs({ files: [], requestFileIds: [], conversationFiles: [earlier] });
+    const call = jest.fn(async (resolved: unknown) => resolved);
+    await callWithMCPAttachments({
+      refs: turnTwo,
+      serverConfig: { attachmentUrls: EXCEL_POLICY },
+      toolArguments: { file_urls: [stored] },
+      call,
+    });
+    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
+    expect(new URL(resolved.file_urls[0]).pathname).toContain('/api/files/signed/');
+  });
+
+  it('derives a different reference for the same file under another owner', () => {
+    const own = buildRefs()!.accepted(EXCEL_POLICY)[0].ref;
+    const other = buildRefs({
+      files: [makeFile({ user: 'user-2' })],
+      owner: { userId: 'user-2' },
+    })!.accepted(EXCEL_POLICY)[0].ref;
+    expect(other).not.toBe(own);
   });
 
   it('builds references when only earlier messages have files', () => {
@@ -316,6 +359,42 @@ describe('callWithMCPAttachments', () => {
     expect(sent.file_urls).toEqual([REF]);
   });
 
+  it.each([
+    ['a copied list line', `${REF}: "Q3 Sales.xlsx"`],
+    ['trailing whitespace', `${REF} (Q3 Sales.xlsx)`],
+  ])('resolves the reference at the start of %s', async (_name, sent) => {
+    const call = jest.fn(async (resolved: unknown) => resolved);
+    await callWithMCPAttachments({
+      refs: buildRefs(),
+      serverConfig: excel,
+      toolArguments: { file_urls: [sent, REF] },
+      call,
+    });
+    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
+    expect(resolved.file_urls[0]).toBe(resolved.file_urls[1]);
+    expect(new URL(resolved.file_urls[0]).pathname).toBe(
+      '/api/files/signed/65f1c0ffee0123456789abcd',
+    );
+    expect(localSigner).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['extra id characters', `${REF}0`],
+    ['a path after the reference', `${REF}/other`],
+    ['a prefix of the reference', REF.slice(0, -1)],
+  ])('does not treat %s as a reference', async (_name, sent) => {
+    const call = jest.fn();
+    await expect(
+      callWithMCPAttachments({
+        refs: buildRefs(),
+        serverConfig: excel,
+        toolArguments: { file_urls: [sent] },
+        call,
+      }),
+    ).rejects.toMatchObject({ code: 'unknown_reference' });
+    expect(call).not.toHaveBeenCalled();
+  });
+
   it('mints once per reference and signs the clean file name', async () => {
     await callWithMCPAttachments({
       refs: buildRefs(),
@@ -341,8 +420,8 @@ describe('callWithMCPAttachments', () => {
   });
 
   it.each([
-    ['an unknown reference', buildRefs, `attachment://${NONCE}/9`],
-    ['a reference from another turn', buildRefs, 'attachment://ffffffff/1'],
+    ['an unknown reference', buildRefs, 'attachment://000000000000'],
+    ['a reference to a file this turn does not list', buildRefs, 'attachment://ffffffff/1'],
     ['a turn without attachments', () => undefined, REF],
     ['a cloned reference table', () => ({ ...buildRefs() }), REF],
   ])('rejects %s before calling the server', async (_name, makeRefs, ref) => {

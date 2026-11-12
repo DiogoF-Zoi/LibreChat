@@ -1746,8 +1746,8 @@ describe('User parameter passing tests', () => {
             }),
           }),
           getServerConfig: async () => ({}),
-          nonce: 'n0nce000',
         });
+      const reference = refs().accepted({})[0].ref;
       const invoke = async (serverConfig, configurableRefs) => {
         require('~/models').getRoleByName.mockResolvedValue({
           permissions: { [PermissionTypes.MCP_SERVERS]: { [Permissions.USE]: true } },
@@ -1770,7 +1770,7 @@ describe('User parameter passing tests', () => {
           userMCPAuthMap: {},
           availableTools,
         });
-        const args = { file_urls: ['attachment://n0nce000/1'] };
+        const args = { file_urls: [reference] };
         const output = await tool.invoke(args, {
           configurable: { user, [MCP_ATTACHMENT_REFS_KEY]: configurableRefs },
           metadata: { provider: 'openai', thread_id: 'thread-1', run_id: 'run-1' },
@@ -1783,16 +1783,14 @@ describe('User parameter passing tests', () => {
         const { args, output, callTool } = await invoke({ attachmentUrls: {} }, refs());
 
         expect(callTool.mock.calls[0][0].toolArguments).toEqual({ file_urls: [signedURL] });
-        expect(args).toEqual({ file_urls: ['attachment://n0nce000/1'] });
-        expect(output).toBe('loaded attachment://n0nce000/1');
+        expect(args).toEqual({ file_urls: [reference] });
+        expect(output).toBe(`loaded ${reference}`);
       });
 
       it('passes references through untouched to servers that did not opt in', async () => {
         const { callTool } = await invoke({}, refs());
 
-        expect(callTool.mock.calls[0][0].toolArguments).toEqual({
-          file_urls: ['attachment://n0nce000/1'],
-        });
+        expect(callTool.mock.calls[0][0].toolArguments).toEqual({ file_urls: [reference] });
       });
 
       it('fails the call with a model-safe message when the turn has no references', async () => {
