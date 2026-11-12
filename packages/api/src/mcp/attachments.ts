@@ -13,6 +13,9 @@ import { stripFileIdPrefix } from '~/storage/path';
 export const MCP_ATTACHMENT_REFS_KEY = 'mcpAttachmentRefs';
 
 const REF_SCHEME = 'attachment://';
+const REF_ID_LENGTH = 12;
+/** A reference at the start of a string, followed by nothing or by a list line's `: "name"` tail. */
+const LEADING_REF = new RegExp(`^${REF_SCHEME}[0-9a-f]{${REF_ID_LENGTH}}(?=$|[:\\s])`);
 const DEFAULT_MIN_TTL_SECONDS = 60;
 const MAX_FILENAME_LENGTH = 200;
 const MAX_ECHOED_REF_LENGTH = 120;
@@ -77,8 +80,17 @@ export interface MCPAttachmentRefsParams {
   getServerConfig: (
     serverName: string,
   ) => Promise<{ attachmentUrls?: MCPAttachmentURLs } | null | undefined>;
-  nonce?: string;
   now?: () => number;
+}
+
+/**
+ * A file keeps the same reference in every turn: tool calls are stored with the reference the
+ * model sent, so one copied from an earlier turn has to resolve again. It is a digest, not the
+ * record id, and only resolves for files the turn lists after the owner checks.
+ */
+function referenceFor(file: AttachmentFile, userId: string): string {
+  const digest = crypto.createHash('sha256').update(`${userId}\0${file.file_id}`).digest('hex');
+  return `${REF_SCHEME}${digest.slice(0, REF_ID_LENGTH)}`;
 }
 
 const isSameId = (a: unknown, b: unknown): boolean => a != null && b != null && `${a}` === `${b}`;
@@ -112,10 +124,10 @@ function byRecency(a: AttachmentFile, b: AttachmentFile): number {
 }
 
 /**
- * This turn's view of the conversation's attachments, addressed by opaque references: the latest
- * message's files first, then earlier messages' files, most recent first. It holds file records
- * and mints URLs on demand; it never stores a URL. Fields are private so neither serialization
- * nor logging of the run config exposes the records.
+ * This turn's view of the conversation's attachments, addressed by opaque references that stay the
+ * same for a file across turns: the latest message's files first, then earlier messages' files,
+ * most recent first. It holds file records and mints URLs on demand; it never stores a URL. Fields
+ * are private so neither serialization nor logging of the run config exposes the records.
  */
 export class MCPAttachmentRefs {
   readonly #entries: Map<string, AttachmentEntry>;
@@ -190,7 +202,7 @@ export class MCPAttachmentRefs {
       );
     return [
       '# Attached Files',
-      "Files the user attached in this conversation, the latest message's first. When a tool from an accepting server asks for file URLs (for example a `file_urls` argument), pass the reference exactly as written in place of the URL. It is exchanged for a short-lived download link only when the tool runs. A server may not keep a file between calls, so when a tool needs a file again or reports that it is gone, pass its reference again. References are valid for this turn only; each turn lists them anew.",
+      "Files the user attached in this conversation, the latest message's first. When a tool from an accepting server asks for file URLs (for example a `file_urls` argument), pass only the `attachment://…` token, without the file name, type or any punctuation after it, in place of the URL. It is exchanged for a short-lived download link only when the tool runs. A server may not keep a file between calls, so when a tool needs a file again or reports that it is gone, pass its reference again. A file keeps the same reference in every turn, but only the files listed here can be used.",
       ...lines,
     ].join('\n');
   }
@@ -237,7 +249,6 @@ export function createMCPAttachmentRefs(
   params: MCPAttachmentRefsParams,
 ): MCPAttachmentRefs | undefined {
   const requestFileIds = new Set(params.requestFileIds);
-  const nonce = params.nonce ?? crypto.randomBytes(4).toString('hex');
   const seen = new Set<string>();
   const entries: AttachmentEntry[] = [];
 
@@ -249,15 +260,21 @@ export function createMCPAttachmentRefs(
     !!file.source &&
     !!params.getStrategyFunctions(file.source).getDownloadURL;
 
-  const add = (file: AttachmentFile, earlier: boolean): void => {
+  const add = (file: AttachmentFile, earlier: boolean): boolean => {
     seen.add(file.file_id);
+    const ref = referenceFor(file, params.owner.userId);
+    /** A digest collision would hand one reference to two files; the later one is left out. */
+    if (entries.some((entry) => entry.ref === ref)) {
+      return false;
+    }
     entries.push({
-      ref: `${REF_SCHEME}${nonce}/${entries.length + 1}`,
+      ref,
       file,
       filename: displayName(file.filename),
       type: (file.type || 'application/octet-stream').toLowerCase(),
       earlier,
     });
+    return true;
   };
 
   for (const file of params.files) {
@@ -274,8 +291,7 @@ export function createMCPAttachmentRefs(
     if (earlierCount >= MAX_MCP_ATTACHMENT_CONVERSATION_FILES) {
       break;
     }
-    if (isEligible(file)) {
-      add(file, true);
+    if (isEligible(file) && add(file, true)) {
       earlierCount += 1;
     }
   }
@@ -305,6 +321,14 @@ function mapStrings(value: unknown, map: Mapper, depth = 0): unknown {
     copy[key] = mapStrings(item, map, depth + 1);
   }
   return copy;
+}
+
+/**
+ * The reference a model-sent string names. Models sometimes copy the whole list line, so a leading
+ * reference followed by `:` or whitespace counts; anything else is looked up as written.
+ */
+function normalizeRef(value: string): string {
+  return LEADING_REF.exec(value)?.[0] ?? value;
 }
 
 function collectRefs(value: unknown, refs: Set<string>, depth = 0): void {
@@ -363,17 +387,22 @@ export async function callWithMCPAttachments<T>({
     return call(toolArguments);
   }
   const turnRefs = refs instanceof MCPAttachmentRefs ? refs : undefined;
+  /** Keyed by the string the model sent; one URL is minted per reference it names. */
   const minted = new Map<string, string>();
+  const urls = new Map<string, Promise<string>>();
   await Promise.all(
-    [...requested].map(async (ref) => {
+    [...requested].map(async (sent) => {
       if (!turnRefs) {
-        throw new MCPAttachmentError('unknown_reference', ref);
+        throw new MCPAttachmentError('unknown_reference', sent);
       }
-      minted.set(ref, await turnRefs.mint(ref, config));
+      const ref = normalizeRef(sent);
+      const url = urls.get(ref) ?? turnRefs.mint(ref, config);
+      urls.set(ref, url);
+      minted.set(sent, await url);
     }),
   );
-  const replacements = [...minted].flatMap(([ref, url]) =>
-    urlSpellings(url).map((spelling) => [spelling, ref] as const),
+  const replacements = [...minted].flatMap(([sent, url]) =>
+    urlSpellings(url).map((spelling) => [spelling, normalizeRef(sent)] as const),
   );
   const scrub = (value: string): string =>
     replacements.reduce(
