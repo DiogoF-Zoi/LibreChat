@@ -368,7 +368,6 @@ describe('Agent Context Utilities', () => {
           owner: { userId: 'user-1' },
           getStrategyFunctions: () => ({ getDownloadURL: jest.fn() }),
           getServerConfig,
-          nonce: 'n0nce000',
         });
       const excelAgent = (): AgentWithTools => ({
         id: 'test-agent',
@@ -396,8 +395,8 @@ describe('Agent Context Utilities', () => {
 
         expect(agent.instructions).toBe('MCP instructions');
         expect(agent.additional_instructions).toMatch(/^Shared context\n\n# Attached Files\n/);
-        expect(agent.additional_instructions).toContain(
-          `- attachment://n0nce000/1: "Q3.xlsx" (${xlsx}); accepted by: excel`,
+        expect(agent.additional_instructions).toMatch(
+          new RegExp(`- attachment://[0-9a-f]{12}: "Q3.xlsx" \\(${xlsx}\\); accepted by: excel`),
         );
       });
 
