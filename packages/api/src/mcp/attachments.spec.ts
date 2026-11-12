@@ -1,4 +1,8 @@
-import { FileSources, MAX_DOWNLOAD_URL_EXPIRY_SECONDS } from 'librechat-data-provider';
+import {
+  FileSources,
+  MAX_DOWNLOAD_URL_EXPIRY_SECONDS,
+  MAX_MCP_ATTACHMENT_CONVERSATION_FILES,
+} from 'librechat-data-provider';
 import type { MCPAttachmentURLs, TFile } from 'librechat-data-provider';
 import type { DownloadURLParams, DownloadURLResult } from '~/storage/types';
 import {
@@ -107,6 +111,134 @@ describe('createMCPAttachmentRefs', () => {
 
   it('serializes without exposing file records', () => {
     expect(JSON.stringify({ refs: buildRefs() })).toBe('{"refs":{"size":1}}');
+  });
+});
+
+describe('earlier conversation files', () => {
+  /** `n` minutes old: a lower `n` is more recent. */
+  const earlierFile = (n: number, overrides: Partial<TestFile> = {}): TestFile =>
+    makeFile({
+      _id: `65f1c0ffee0123456789${n.toString(16).padStart(4, '0')}`,
+      file_id: `earlier-${n}`,
+      filename: `earlier-${n}.xlsx`,
+      createdAt: new Date(NOW - n * 60_000).toISOString(),
+      ...overrides,
+    });
+
+  const refFor = (context: string, filename: string): string => {
+    const line = context.split('\n').find((text) => text.includes(`"${filename}"`));
+    const ref = line?.match(/attachment:\/\/\S+(?=:)/)?.[0];
+    if (!ref) {
+      throw new Error(`${filename} is not listed`);
+    }
+    return ref;
+  };
+
+  it('lists them after the latest message, most recent first, without repeating a file', async () => {
+    const latest = makeFile();
+    const refs = buildRefs({
+      files: [latest],
+      requestFileIds: [latest.file_id],
+      conversationFiles: [earlierFile(30), latest, earlierFile(5), earlierFile(60)],
+    });
+    expect(refs?.size).toBe(4);
+
+    const context = await refs!.formatContext(['excel']);
+    expect(context).toContain(`- ${REF}: "Q3 Sales.xlsx" (${XLSX}); accepted by: excel`);
+    expect(context).toContain(
+      `- attachment://${NONCE}/2: "earlier-5.xlsx" (${XLSX}); from an earlier message; accepted by: excel`,
+    );
+    const order = ['earlier-5.xlsx', 'earlier-30.xlsx', 'earlier-60.xlsx'].map((name) =>
+      context.indexOf(`"${name}"`),
+    );
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it('builds references when only earlier messages have files', () => {
+    expect(buildRefs({ requestFileIds: [], conversationFiles: [earlierFile(1)] })?.size).toBe(1);
+  });
+
+  it('applies the owner, tenant and storage checks to them too', () => {
+    const refs = buildRefs({
+      requestFileIds: [],
+      conversationFiles: [
+        earlierFile(1, { user: 'user-2' }),
+        earlierFile(2, { tenantId: 'tenant-b' }),
+        earlierFile(3, { source: FileSources.text }),
+        null,
+      ],
+    });
+    expect(refs).toBeUndefined();
+  });
+
+  it('never holds more than the ceiling of earlier files', () => {
+    const many = Array.from({ length: MAX_MCP_ATTACHMENT_CONVERSATION_FILES + 5 }, (_, n) =>
+      earlierFile(n + 1),
+    );
+    expect(buildRefs({ requestFileIds: [], conversationFiles: many })?.size).toBe(
+      MAX_MCP_ATTACHMENT_CONVERSATION_FILES,
+    );
+  });
+
+  it('offers each server at most its own `conversationFiles`, counting only matching types', async () => {
+    const refs = buildRefs({
+      requestFileIds: [],
+      conversationFiles: [
+        earlierFile(1, { type: 'image/png', filename: 'newest.png' }),
+        earlierFile(2),
+        earlierFile(3),
+      ],
+      getServerConfig: async () => ({ attachmentUrls: { ...EXCEL_POLICY, conversationFiles: 1 } }),
+    });
+    const context = await refs!.formatContext(['excel']);
+    expect(context).toContain('"earlier-2.xlsx"');
+    expect(context).not.toContain('"earlier-3.xlsx"');
+    expect(context).not.toContain('newest.png');
+  });
+
+  it('offers none when `conversationFiles` is 0', async () => {
+    const latest = makeFile();
+    const refs = buildRefs({
+      files: [latest],
+      requestFileIds: [latest.file_id],
+      conversationFiles: [earlierFile(1)],
+      getServerConfig: async () => ({ attachmentUrls: { ...EXCEL_POLICY, conversationFiles: 0 } }),
+    });
+    const context = await refs!.formatContext(['excel']);
+    expect(context).toContain('"Q3 Sales.xlsx"');
+    expect(context).not.toContain('earlier-1');
+  });
+
+  it('mints an offered earlier file and refuses one past the server limit', async () => {
+    const refs = buildRefs({
+      requestFileIds: [],
+      conversationFiles: [earlierFile(1), earlierFile(2)],
+    });
+    const context = await refs!.formatContext(['excel']);
+    const newest = refFor(context, 'earlier-1.xlsx');
+    const older = refFor(context, 'earlier-2.xlsx');
+    const limited = { attachmentUrls: { ...EXCEL_POLICY, conversationFiles: 1 } };
+
+    const call = jest.fn(async (resolved: unknown) => resolved);
+    await callWithMCPAttachments({
+      refs,
+      serverConfig: limited,
+      toolArguments: { file_urls: [newest] },
+      call,
+    });
+    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
+    expect(new URL(resolved.file_urls[0]).pathname).toBe(
+      '/api/files/signed/65f1c0ffee01234567890001',
+    );
+
+    await expect(
+      callWithMCPAttachments({
+        refs,
+        serverConfig: limited,
+        toolArguments: { file_urls: [older] },
+        call: jest.fn(),
+      }),
+    ).rejects.toMatchObject({ code: 'unknown_reference' });
   });
 });
 

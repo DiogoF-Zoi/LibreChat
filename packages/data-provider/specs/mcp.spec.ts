@@ -5,6 +5,7 @@ import {
   MCPServerUserInputSchema,
   MCP_USER_INPUT_FIELDS,
   MAX_MCP_ICON_PATH_LENGTH,
+  MAX_MCP_ATTACHMENT_CONVERSATION_FILES,
 } from '../src/mcp';
 
 describe('MCP server title validation', () => {
@@ -914,7 +915,19 @@ describe('attachmentUrls', () => {
     expect(MCPOptionsSchema.parse({ ...server, attachmentUrls: {} }).attachmentUrls).toEqual({});
   });
 
+  it.each([0, 20, MAX_MCP_ATTACHMENT_CONVERSATION_FILES])(
+    'accepts %s earlier conversation files',
+    (conversationFiles) => {
+      expect(
+        MCPOptionsSchema.parse({ ...server, attachmentUrls: { conversationFiles } }).attachmentUrls,
+      ).toEqual({ conversationFiles });
+    },
+  );
+
   it.each([
+    ['too many earlier conversation files', { conversationFiles: 101 }],
+    ['a negative conversation file count', { conversationFiles: -1 }],
+    ['a fractional conversation file count', { conversationFiles: 1.5 }],
     ['a lifetime above the download URL cap', { expiry: 3601 }],
     ['a minimum lifetime longer than the URL lifetime', { expiry: 60, minTtl: 61 }],
     ['a malformed MIME type', { mimeTypes: ['*/*'] }],
