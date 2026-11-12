@@ -767,7 +767,7 @@ actions:
 #   excel:
 #     type: streamable-http
 #     url: https://excel-mcp.example.com/mcp
-#     # Lets this server's tools read the files a user attaches to the current message. The model
+#     # Lets this server's tools read the files a user attaches in the conversation. The model
 #     # sees `attachment://…` references; each is swapped for a freshly signed download URL only in
 #     # the outbound tool call, so URLs never reach the model, traces or stored messages. Files must
 #     # be stored where a download URL can be signed (local, S3, CloudFront). For local storage the
@@ -778,6 +778,10 @@ actions:
 #         - application/vnd.ms-excel
 #       expiry: 300 # seconds; defaults to fileConfig.downloadUrlExpiry, capped at 3600
 #       minTtl: 60 # seconds a URL must have left when handed to the server
+#       # Files from earlier messages also offered, most recent first, so a tool can be handed a
+#       # file again when the server kept nothing. 0 = latest message only; default 20, max 100.
+#       # Earlier files are listed only when `resendFiles` is on for the endpoint (the default).
+#       conversationFiles: 20
 #   puppeteer:
 #     type: stdio
 #     command: npx

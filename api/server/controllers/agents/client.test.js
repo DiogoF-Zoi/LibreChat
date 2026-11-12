@@ -6448,6 +6448,38 @@ describe('AgentClient - titleConvo', () => {
       ).resolves.toEqual(expect.objectContaining({ prompt: expect.any(Array) }));
     });
 
+    it('offers MCP servers the owner-resolved files of earlier messages', async () => {
+      const sheet = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const ownFile = { ...makeUploadedFile('own-sheet', 'Q3.xlsx', sheet), _id: 'a'.repeat(24) };
+      const otherUsersFile = {
+        ...makeUploadedFile('other-sheet', 'Theirs.xlsx', sheet),
+        _id: 'b'.repeat(24),
+        user: 'user-456',
+      };
+      client.authorizedHistoricalFiles = new Map([
+        ['own-sheet', ownFile],
+        ['other-sheet', otherUsersFile],
+      ]);
+
+      await client.buildMessages(
+        [
+          {
+            messageId: 'msg-1',
+            parentMessageId: null,
+            sender: 'User',
+            text: 'Earlier upload.',
+            isCreatedByUser: true,
+            files: [{ file_id: 'own-sheet' }, { file_id: 'other-sheet' }],
+          },
+        ],
+        'msg-1',
+        {},
+      );
+
+      /** The latest message attached nothing, so the one reference comes from history. */
+      expect(JSON.parse(JSON.stringify(client.mcpAttachmentRefs))).toEqual({ size: 1 });
+    });
+
     it.each([
       ['seeds the run from a server-authored parent response', undefined, true],
       ['ignores context meta on a client-submitted parent response', true, false],

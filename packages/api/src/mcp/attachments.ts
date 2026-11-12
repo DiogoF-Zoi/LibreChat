@@ -1,4 +1,8 @@
 import crypto from 'node:crypto';
+import {
+  MAX_MCP_ATTACHMENT_CONVERSATION_FILES,
+  DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES,
+} from 'librechat-data-provider';
 import type { MCPAttachmentURLs, TFile } from 'librechat-data-provider';
 import type { FileDownloadURLStrategy } from '~/files/download';
 import { resolveDownloadURLExpiry, resolveFileDownloadURL } from '~/files/download';
@@ -24,7 +28,7 @@ export type MCPAttachmentErrorCode =
 
 const ATTACHMENT_ERROR_MESSAGES: Record<MCPAttachmentErrorCode, (ref: string) => string> = {
   unknown_reference: (ref) =>
-    `Attachment reference "${ref}" is not available in this turn. References only work in the turn they were listed; ask the user to attach the file again.`,
+    `Attachment reference "${ref}" is not available in this turn. Use a reference from this turn's Attached Files list; if the file is not listed there, ask the user to attach it again.`,
   unsupported_type: (ref) => `This tool does not accept the file type of attachment "${ref}".`,
   unsupported_source: (ref) => `Attachment "${ref}" cannot be shared with tools.`,
   insufficient_ttl: (ref) =>
@@ -51,6 +55,8 @@ interface AttachmentEntry {
   file: AttachmentFile;
   filename: string;
   type: string;
+  /** Attached to an earlier message of the conversation rather than the latest one. */
+  earlier: boolean;
 }
 
 export interface MCPAttachmentRefsParams {
@@ -58,6 +64,11 @@ export interface MCPAttachmentRefsParams {
   files: ReadonlyArray<AttachmentFile | null | undefined>;
   /** File ids the user attached to this message; anything else is not this turn's attachment. */
   requestFileIds: Iterable<string>;
+  /**
+   * Records of files referenced by earlier messages of this conversation, already loaded for the
+   * turn under an owner filter (`authorizedHistoricalFiles`). Each is re-checked against the owner.
+   */
+  conversationFiles?: Iterable<AttachmentFile | null | undefined>;
   owner: { userId: string; tenantId?: string | null };
   getStrategyFunctions: (source: string) => FileDownloadURLStrategy;
   /** `fileConfig.downloadUrlExpiry`; a server's own `attachmentUrls.expiry` takes precedence. */
@@ -91,10 +102,20 @@ function displayName(filename: string | undefined): string {
   return name.length > MAX_FILENAME_LENGTH ? `${name.slice(0, MAX_FILENAME_LENGTH)}…` : name;
 }
 
+/** Most recent first; a record without a usable date sorts last. */
+function byRecency(a: AttachmentFile, b: AttachmentFile): number {
+  const time = (file: AttachmentFile): number => {
+    const value = file.createdAt == null ? NaN : new Date(file.createdAt).getTime();
+    return Number.isFinite(value) ? value : -Infinity;
+  };
+  return time(b) - time(a) || 0;
+}
+
 /**
- * The current turn's attachments, addressed by opaque references. It holds file records and
- * mints URLs on demand; it never stores a URL. Fields are private so neither serialization nor
- * logging of the run config exposes the records.
+ * This turn's view of the conversation's attachments, addressed by opaque references: the latest
+ * message's files first, then earlier messages' files, most recent first. It holds file records
+ * and mints URLs on demand; it never stores a URL. Fields are private so neither serialization
+ * nor logging of the run config exposes the records.
  */
 export class MCPAttachmentRefs {
   readonly #entries: Map<string, AttachmentEntry>;
@@ -119,14 +140,26 @@ export class MCPAttachmentRefs {
     return { size: this.size };
   }
 
-  /** References a server with this config accepts. */
+  /**
+   * References a server with this config accepts: every latest-message file of a matching type,
+   * then up to `conversationFiles` earlier ones of a matching type.
+   */
   accepted(config: MCPAttachmentURLs | undefined): AttachmentEntry[] {
     if (!config) {
       return [];
     }
-    return [...this.#entries.values()].filter((entry) =>
-      matchesMimeType(entry.type, config.mimeTypes),
-    );
+    const earlierLimit = config.conversationFiles ?? DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES;
+    let earlierCount = 0;
+    return [...this.#entries.values()].filter((entry) => {
+      if (!matchesMimeType(entry.type, config.mimeTypes)) {
+        return false;
+      }
+      if (!entry.earlier) {
+        return true;
+      }
+      earlierCount += 1;
+      return earlierCount <= earlierLimit;
+    });
   }
 
   /**
@@ -153,11 +186,11 @@ export class MCPAttachmentRefs {
       .filter((entry) => accepting.has(entry.ref))
       .map(
         (entry) =>
-          `- ${entry.ref}: ${JSON.stringify(entry.filename)} (${entry.type}); accepted by: ${accepting.get(entry.ref)?.join(', ')}`,
+          `- ${entry.ref}: ${JSON.stringify(entry.filename)} (${entry.type});${entry.earlier ? ' from an earlier message;' : ''} accepted by: ${accepting.get(entry.ref)?.join(', ')}`,
       );
     return [
       '# Attached Files',
-      'The user attached these files to their latest message. When a tool from an accepting server asks for file URLs (for example a `file_urls` argument), pass the reference exactly as written in place of the URL. It is exchanged for a short-lived download link only when the tool runs, and it is valid for this turn only.',
+      "Files the user attached in this conversation, the latest message's first. When a tool from an accepting server asks for file URLs (for example a `file_urls` argument), pass the reference exactly as written in place of the URL. It is exchanged for a short-lived download link only when the tool runs. A server may not keep a file between calls, so when a tool needs a file again or reports that it is gone, pass its reference again. References are valid for this turn only; each turn lists them anew.",
       ...lines,
     ].join('\n');
   }
@@ -170,6 +203,10 @@ export class MCPAttachmentRefs {
     }
     if (!matchesMimeType(entry.type, config.mimeTypes)) {
       throw new MCPAttachmentError('unsupported_type', ref);
+    }
+    /** An earlier file past this server's `conversationFiles` was never offered to it. */
+    if (entry.earlier && !this.accepted(config).includes(entry)) {
+      throw new MCPAttachmentError('unknown_reference', ref);
     }
     const expiresIn = resolveDownloadURLExpiry(config.expiry ?? this.#defaultExpiry);
     const result = await resolveFileDownloadURL({
@@ -190,40 +227,59 @@ export class MCPAttachmentRefs {
 }
 
 /**
- * Builds the turn's references from the request's attachments, or `undefined` when none can be
- * handed to a tool. Only files the user attached to this message, owned by the acting user in
- * their tenant, and stored where a download URL can be signed are listed.
+ * Builds the turn's references, or `undefined` when no file can be handed to a tool. Lists the
+ * files the user attached to this message, then files from earlier messages of the conversation
+ * (most recent first, at most `MAX_MCP_ATTACHMENT_CONVERSATION_FILES`). Every listed file is owned
+ * by the acting user in their tenant and stored where a download URL can be signed; which ones a
+ * given server is offered is decided per server by `MCPAttachmentRefs.accepted`.
  */
 export function createMCPAttachmentRefs(
   params: MCPAttachmentRefsParams,
 ): MCPAttachmentRefs | undefined {
   const requestFileIds = new Set(params.requestFileIds);
-  if (requestFileIds.size === 0) {
-    return undefined;
-  }
   const nonce = params.nonce ?? crypto.randomBytes(4).toString('hex');
   const seen = new Set<string>();
   const entries: AttachmentEntry[] = [];
-  for (const file of params.files) {
-    if (
-      !file?.file_id ||
-      seen.has(file.file_id) ||
-      !requestFileIds.has(file.file_id) ||
-      !isSameId(file.user, params.owner.userId) ||
-      (file.tenantId ?? null) !== (params.owner.tenantId ?? null) ||
-      !file.source ||
-      !params.getStrategyFunctions(file.source).getDownloadURL
-    ) {
-      continue;
-    }
+
+  const isEligible = (file: AttachmentFile | null | undefined): file is AttachmentFile =>
+    !!file?.file_id &&
+    !seen.has(file.file_id) &&
+    isSameId(file.user, params.owner.userId) &&
+    (file.tenantId ?? null) === (params.owner.tenantId ?? null) &&
+    !!file.source &&
+    !!params.getStrategyFunctions(file.source).getDownloadURL;
+
+  const add = (file: AttachmentFile, earlier: boolean): void => {
     seen.add(file.file_id);
     entries.push({
       ref: `${REF_SCHEME}${nonce}/${entries.length + 1}`,
       file,
       filename: displayName(file.filename),
       type: (file.type || 'application/octet-stream').toLowerCase(),
+      earlier,
     });
+  };
+
+  for (const file of params.files) {
+    if (file && requestFileIds.has(file.file_id) && isEligible(file)) {
+      add(file, false);
+    }
   }
+
+  const earlierFiles = [...(params.conversationFiles ?? [])]
+    .filter((file): file is AttachmentFile => file != null)
+    .sort(byRecency);
+  let earlierCount = 0;
+  for (const file of earlierFiles) {
+    if (earlierCount >= MAX_MCP_ATTACHMENT_CONVERSATION_FILES) {
+      break;
+    }
+    if (isEligible(file)) {
+      add(file, true);
+      earlierCount += 1;
+    }
+  }
+
   return entries.length > 0 ? new MCPAttachmentRefs(entries, params) : undefined;
 }
 

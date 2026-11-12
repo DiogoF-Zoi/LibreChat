@@ -239,8 +239,13 @@ const DeclaredToolPropertySchema = z
 /** `type/subtype` or `type/*`, lowercase. */
 const ATTACHMENT_MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/(?:\*|[a-z0-9][a-z0-9!#$&^_.+-]*)$/;
 
+/** Default for `attachmentUrls.conversationFiles`. */
+export const DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES = 20;
+/** Ceiling for `attachmentUrls.conversationFiles`; each listed file costs a line of context. */
+export const MAX_MCP_ATTACHMENT_CONVERSATION_FILES = 100;
+
 /**
- * Hands the current turn's attachments to a server's tools as short-lived signed download URLs.
+ * Hands the conversation's attachments to a server's tools as short-lived signed download URLs.
  * The model only sees opaque `attachment://` references; each is exchanged for a freshly signed
  * URL in the outbound tool call, so the URL never reaches the model, traces or stored messages.
  */
@@ -252,6 +257,18 @@ export const MCPAttachmentURLsSchema = z
     expiry: z.number().int().positive().max(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).optional(),
     /** Lifetime a URL must have left when handed to the server, in seconds. Default: 60. */
     minTtl: z.number().int().nonnegative().max(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).optional(),
+    /**
+     * Files from earlier messages of the conversation the server is also offered, most recent
+     * first, on top of the latest message's attachments. A server cannot be assumed to keep a file
+     * between calls, so this lets a tool be handed one again. `0` offers the latest message only.
+     * Default: 20.
+     */
+    conversationFiles: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_MCP_ATTACHMENT_CONVERSATION_FILES)
+      .optional(),
   })
   .strict()
   .refine((value) => value.expiry == null || value.minTtl == null || value.minTtl <= value.expiry, {

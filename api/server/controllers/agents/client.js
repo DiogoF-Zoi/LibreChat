@@ -3087,6 +3087,8 @@ class AgentClient extends BaseClient {
     this.mcpAttachmentRefs = createMCPAttachmentRefs({
       files: requestAttachments,
       requestFileIds: (this.options.req.body.files ?? []).map((file) => file?.file_id),
+      /** Owner-scoped records `addPreviousAttachments` loaded for the history; no extra query. */
+      conversationFiles: this.authorizedHistoricalFiles?.values(),
       owner: { userId: requestUser?.id, tenantId: requestUser?.tenantId },
       getStrategyFunctions,
       defaultExpiry: this.options.req.config?.fileConfig?.downloadUrlExpiry,
