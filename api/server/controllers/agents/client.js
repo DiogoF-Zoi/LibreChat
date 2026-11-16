@@ -272,6 +272,30 @@ const loadAgent = (params) =>
     getAccessibleMCPServers,
   });
 
+/**
+ * The turn's MCP attachment references. A new turn and the resume of a paused one both build them
+ * here, because the resumed run is rebuilt without `buildMessages` and would otherwise lose them.
+ * @param {object} params
+ * @param {ServerRequest} params.req
+ * @param {Array} params.files - Hydrated attachments of the user message being answered.
+ * @param {Iterable} [params.conversationFiles] - Owner-scoped records of earlier messages' files.
+ * @param {Record<string, import('@librechat/api').ParsedServerConfig>} [params.configServers]
+ * @returns {import('@librechat/api').MCPAttachmentRefs | undefined}
+ */
+function buildMCPAttachmentRefs({ req, files, conversationFiles, configServers }) {
+  const user = req.user;
+  return createMCPAttachmentRefs({
+    files,
+    requestFileIds: (req.body.files ?? []).map((file) => file?.file_id),
+    conversationFiles,
+    owner: { userId: user?.id, tenantId: user?.tenantId },
+    getStrategyFunctions,
+    defaultExpiry: req.config?.fileConfig?.downloadUrlExpiry,
+    getServerConfig: (serverName) =>
+      getMCPServersRegistry().getServerConfig(serverName, user?.id, configServers, user?.role),
+  });
+}
+
 const MEMORY_INPUT_CHARS_PER_TOKEN = 8;
 
 function normalizeEventActorContextMeta(contextMeta) {
@@ -3091,23 +3115,13 @@ class AgentClient extends BaseClient {
      */
     const ephemeralAgent = this.options.req.body.ephemeralAgent;
     const mcpManager = getMCPManager();
-    const requestUser = this.options.req.user;
     /** Read by MCP tool calls through the run's `configurable`; holds records, never URLs. */
-    this.mcpAttachmentRefs = createMCPAttachmentRefs({
+    this.mcpAttachmentRefs = buildMCPAttachmentRefs({
+      req: this.options.req,
       files: requestAttachments,
-      requestFileIds: (this.options.req.body.files ?? []).map((file) => file?.file_id),
       /** Owner-scoped records `addPreviousAttachments` loaded for the history; no extra query. */
       conversationFiles: this.authorizedHistoricalFiles?.values(),
-      owner: { userId: requestUser?.id, tenantId: requestUser?.tenantId },
-      getStrategyFunctions,
-      defaultExpiry: this.options.req.config?.fileConfig?.downloadUrlExpiry,
-      getServerConfig: (serverName) =>
-        getMCPServersRegistry().getServerConfig(
-          serverName,
-          requestUser?.id,
-          configServers,
-          requestUser?.role,
-        ),
+      configServers,
     });
 
     const prepareRuntimeAgent = async (
@@ -5680,6 +5694,19 @@ class AgentClient extends BaseClient {
         }),
         resolveConfigServers(this.options.req),
       ]);
+      /**
+       * The paused turn's references, which `buildMessages` made before the pause. The checkpoint
+       * files are owner-resolved above; like a new turn, earlier ones are only offered when the
+       * endpoint resends files.
+       */
+      this.mcpAttachmentRefs = buildMCPAttachmentRefs({
+        req: this.options.req,
+        files: requestFiles,
+        conversationFiles:
+          this.options.resendFiles === false ? undefined : resumeContentProjection.checkpointFiles,
+        configServers: resumeConfigServers,
+      });
+      config.configurable[MCP_ATTACHMENT_REFS_KEY] = this.mcpAttachmentRefs;
       const resumeScopedAttachmentMap = buildAgentScopedAttachmentMap({
         agentIds: agents.map((agent) => agent?.id).filter(Boolean),
         attachmentsByAgentId: this.options.agentContextAttachmentsByAgentId,
@@ -5724,6 +5751,7 @@ class AgentClient extends BaseClient {
               sharedRunContext: scopedContext ?? '',
               ephemeralAgent:
                 agent === this.options.agent ? this.options.req.body.ephemeralAgent : undefined,
+              attachmentRefs: this.mcpAttachmentRefs,
             });
             assertModelBoundContent({
               onTraversalFailure: reportLocatorTraversalFailure,
