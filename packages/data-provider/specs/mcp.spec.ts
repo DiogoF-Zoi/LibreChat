@@ -896,7 +896,7 @@ describe('MCP_USER_INPUT_FIELDS', () => {
 });
 
 describe('attachmentUrls', () => {
-  const server = { type: 'streamable-http', url: 'https://excel-mcp.example.com/mcp' };
+  const server = { type: 'streamable-http', url: 'https://documents-mcp.example.com/mcp' };
 
   it('is off unless configured', () => {
     expect(MCPOptionsSchema.parse(server).attachmentUrls).toBeUndefined();

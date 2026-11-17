@@ -1736,9 +1736,9 @@ describe('User parameter passing tests', () => {
       const user = { id: 'attachment-user', role: 'USER' };
       const signedURL = 'https://chat.example.test/api/files/signed/abc?expires=1&signature=sekret';
       const availableTools = {
-        [`inspect_workbook${D}excel`]: {
+        [`read_document${D}documents`]: {
           function: {
-            description: 'Load workbooks',
+            description: 'Read documents',
             parameters: {
               type: 'object',
               properties: { file_urls: { type: 'array', items: { type: 'string' } } },
@@ -1783,10 +1783,10 @@ describe('User parameter passing tests', () => {
           user,
           config: {
             type: 'streamable-http',
-            url: 'https://excel.example.com/mcp',
+            url: 'https://documents.example.com/mcp',
             ...serverConfig,
           },
-          toolKey: `inspect_workbook${D}excel`,
+          toolKey: `read_document${D}documents`,
           provider: 'openai',
           userMCPAuthMap: {},
           availableTools,

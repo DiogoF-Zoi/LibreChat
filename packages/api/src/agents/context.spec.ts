@@ -369,11 +369,11 @@ describe('Agent Context Utilities', () => {
           getStrategyFunctions: () => ({ getDownloadURL: jest.fn() }),
           getServerConfig,
         });
-      const excelAgent = (): AgentWithTools => ({
+      const documentsAgent = (): AgentWithTools => ({
         id: 'test-agent',
         tools: [
           new DynamicStructuredTool({
-            name: `inspect_workbook${Constants.mcp_delimiter}excel`,
+            name: `read_document${Constants.mcp_delimiter}documents`,
             description: 'Test tool',
             schema: testSchema,
             func: async () => 'result',
@@ -382,7 +382,7 @@ describe('Agent Context Utilities', () => {
       });
 
       it('appends the reference list to the dynamic tail for accepting servers', async () => {
-        const agent = excelAgent();
+        const agent = documentsAgent();
         mockMCPManager.formatInstructionsForContext.mockResolvedValue('MCP instructions');
 
         await applyContextToAgent({
@@ -396,12 +396,14 @@ describe('Agent Context Utilities', () => {
         expect(agent.instructions).toBe('MCP instructions');
         expect(agent.additional_instructions).toMatch(/^Shared context\n\n# Attached Files\n/);
         expect(agent.additional_instructions).toMatch(
-          new RegExp(`- attachment://[0-9a-f]{12}: "Q3.xlsx" \\(${xlsx}\\); accepted by: excel`),
+          new RegExp(
+            `- attachment://[0-9a-f]{12}: "Q3.xlsx" \\(${xlsx}\\); accepted by: documents`,
+          ),
         );
       });
 
       it('adds nothing when the agent has no accepting server', async () => {
-        const agent = excelAgent();
+        const agent = documentsAgent();
         mockMCPManager.formatInstructionsForContext.mockResolvedValue('');
 
         await applyContextToAgent({
@@ -415,7 +417,7 @@ describe('Agent Context Utilities', () => {
       });
 
       it('keeps MCP instructions when the server lookup fails', async () => {
-        const agent = excelAgent();
+        const agent = documentsAgent();
         mockMCPManager.formatInstructionsForContext.mockResolvedValue('MCP instructions');
 
         await applyContextToAgent({
