@@ -1110,7 +1110,7 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 900 }));
     });
 
-    it('defaults the strategy expiry to 300 seconds when downloadUrlExpiry is unset', async () => {
+    it('keeps the strategy default expiry when downloadUrlExpiry is unset', async () => {
       const userFileId = uuidv4();
       const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
       getStrategyFunctions.mockReturnValue({ getDownloadURL });
@@ -1128,7 +1128,8 @@ describe('File Routes - Delete with Agent Access', () => {
       const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
 
       expect(response.status).toBe(200);
-      expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 300 }));
+      expect(getDownloadURL).toHaveBeenCalledTimes(1);
+      expect(getDownloadURL.mock.calls[0][0].expiresIn).toBeUndefined();
     });
 
     it('never asks a strategy for a lifetime above one hour', async () => {

@@ -23,6 +23,7 @@ export type FileDownloadURLRequest = {
   file: TFile & { model?: string };
   filename: string;
   req?: ServerRequest;
+  /** Lifetime in seconds, capped at the ceiling. Unset keeps the strategy's own default. */
   expiresIn?: number;
   getStrategyFunctions: (source: string) => FileDownloadURLStrategy;
 };
@@ -43,22 +44,30 @@ export function resolveDownloadURLExpiry(expiresIn: number | undefined): number 
 }
 
 /**
- * Whether a source's bytes can be reached through a signed URL, without signing one. Text files
- * resolve to the local strategy but their content lives in the database, and an unrecognized
- * legacy source makes the strategy lookup throw; both count as unsupported.
+ * A source's signer, or `undefined` when its bytes cannot be reached through a signed URL. Text
+ * files resolve to the local strategy but their content lives in the database, and an
+ * unrecognized legacy source makes the strategy lookup throw; both count as unsupported.
  */
+function getSigner(
+  source: string,
+  getStrategyFunctions: FileDownloadURLRequest['getStrategyFunctions'],
+): FileDownloadURLStrategy['getDownloadURL'] {
+  if (checkOpenAIStorage(source) || source === FileSources.text) {
+    return undefined;
+  }
+  try {
+    return getStrategyFunctions(source).getDownloadURL;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a source's bytes can be reached through a signed URL, without signing one. */
 export function supportsDownloadURL(
   source: string,
   getStrategyFunctions: FileDownloadURLRequest['getStrategyFunctions'],
 ): boolean {
-  if (checkOpenAIStorage(source) || source === FileSources.text) {
-    return false;
-  }
-  try {
-    return !!getStrategyFunctions(source).getDownloadURL;
-  } catch {
-    return false;
-  }
+  return getSigner(source, getStrategyFunctions) != null;
 }
 
 /**
@@ -76,11 +85,7 @@ export async function resolveFileDownloadURL({
   if (checkOpenAIStorage(source)) {
     return { ok: false, error: { code: file.model ? 'unsupported_source' : 'missing_model' } };
   }
-  if (!supportsDownloadURL(source, getStrategyFunctions)) {
-    return { ok: false, error: { code: 'unsupported_source' } };
-  }
-
-  const { getDownloadURL } = getStrategyFunctions(source);
+  const getDownloadURL = getSigner(source, getStrategyFunctions);
   if (!getDownloadURL) {
     return { ok: false, error: { code: 'unsupported_source' } };
   }
@@ -90,7 +95,8 @@ export async function resolveFileDownloadURL({
     file,
     customFilename: filename,
     contentType: file.type || 'application/octet-stream',
-    expiresIn: resolveDownloadURLExpiry(expiresIn),
+    /** Unset leaves S3 on `S3_URL_EXPIRY_SECONDS` and CloudFront on `cloudfront.urlExpiry`. */
+    expiresIn: expiresIn === undefined ? undefined : resolveDownloadURLExpiry(expiresIn),
   });
   return { ok: true, value };
 }

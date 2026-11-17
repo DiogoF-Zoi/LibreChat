@@ -1577,9 +1577,10 @@ endpoints:
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
 #   # Lifetime in seconds of signed file download URLs (S3, CloudFront and local storage). Max 3600.
+#   # Unset, S3 keeps S3_URL_EXPIRY_SECONDS, CloudFront keeps `cloudfront.urlExpiry` and local uses
+#   # 300. MCP attachment URLs (`attachmentUrls`) always use this value or 300, never the S3 setting.
 #   # Local URLs point at DOMAIN_SERVER/api/files/signed/<id> and are signed with a key derived from
-#   # JWT_SECRET, so rotating it invalidates outstanding URLs. Other S3 URLs (images, avatars) keep
-#   # using S3_URL_EXPIRY_SECONDS and CloudFront asset URLs keep using `cloudfront.urlExpiry`.
+#   # JWT_SECRET, so rotating it invalidates outstanding URLs.
 #   # A URL is a bearer credential until it expires: LibreChat redacts it from its own logs, but proxy
 #   # and CDN access logs record query strings by default, so strip them for /api/files/signed/.
 #   downloadUrlExpiry: 300

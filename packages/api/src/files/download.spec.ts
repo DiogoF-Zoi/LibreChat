@@ -77,15 +77,13 @@ describe('resolveFileDownloadURL', () => {
     );
   });
 
-  it('defaults to 300 seconds when no expiry is configured', async () => {
+  it('leaves the lifetime to the strategy when no expiry is configured', async () => {
     const { getDownloadURL, getStrategyFunctions } = createStrategy();
 
     await resolveFileDownloadURL({ file: s3File, filename: 'doc.pdf', getStrategyFunctions });
 
-    expect(getDownloadURL).toHaveBeenCalledWith(
-      expect.objectContaining({ expiresIn: DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS }),
-    );
-    expect(DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS).toBe(300);
+    expect(getDownloadURL).toHaveBeenCalledTimes(1);
+    expect(getDownloadURL.mock.calls[0][0].expiresIn).toBeUndefined();
   });
 
   it('never hands a strategy a lifetime above the ceiling', async () => {
