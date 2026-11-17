@@ -1,12 +1,18 @@
 import crypto from 'node:crypto';
+import { logger } from '@librechat/data-schemas';
 import {
   MAX_MCP_ATTACHMENT_CONVERSATION_FILES,
   DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES,
 } from 'librechat-data-provider';
 import type { MCPAttachmentURLs, TFile } from 'librechat-data-provider';
-import type { FileDownloadURLStrategy } from '~/files/download';
-import { resolveDownloadURLExpiry, resolveFileDownloadURL } from '~/files/download';
+import type { FileDownloadURLOutcome, FileDownloadURLStrategy } from '~/files/download';
+import {
+  supportsDownloadURL,
+  resolveDownloadURLExpiry,
+  resolveFileDownloadURL,
+} from '~/files/download';
 import { isMCPToolResultError, markMCPToolResultError } from './status';
+import { getSafeErrorMetadata } from '~/utils/errors';
 import { stripFileIdPrefix } from '~/storage/path';
 
 /** Run `configurable` key carrying the turn's references from message building to tool calls. */
@@ -27,6 +33,7 @@ export type MCPAttachmentErrorCode =
   | 'unknown_reference'
   | 'unsupported_type'
   | 'unsupported_source'
+  | 'url_unavailable'
   | 'insufficient_ttl';
 
 const ATTACHMENT_ERROR_MESSAGES: Record<MCPAttachmentErrorCode, (ref: string) => string> = {
@@ -34,6 +41,7 @@ const ATTACHMENT_ERROR_MESSAGES: Record<MCPAttachmentErrorCode, (ref: string) =>
     `Attachment reference "${ref}" is not available in this turn. Use a reference from this turn's Attached Files list; if the file is not listed there, ask the user to attach it again.`,
   unsupported_type: (ref) => `This tool does not accept the file type of attachment "${ref}".`,
   unsupported_source: (ref) => `Attachment "${ref}" cannot be shared with tools.`,
+  url_unavailable: (ref) => `A download link for attachment "${ref}" could not be issued.`,
   insufficient_ttl: (ref) =>
     `A download link for attachment "${ref}" could not be issued for long enough. Try again.`,
 };
@@ -221,12 +229,19 @@ export class MCPAttachmentRefs {
       throw new MCPAttachmentError('unknown_reference', ref);
     }
     const expiresIn = resolveDownloadURLExpiry(config.expiry ?? this.#defaultExpiry);
-    const result = await resolveFileDownloadURL({
-      file: entry.file,
-      filename: entry.filename,
-      expiresIn,
-      getStrategyFunctions: this.#getStrategyFunctions,
-    });
+    let result: FileDownloadURLOutcome;
+    try {
+      result = await resolveFileDownloadURL({
+        file: entry.file,
+        filename: entry.filename,
+        expiresIn,
+        getStrategyFunctions: this.#getStrategyFunctions,
+      });
+    } catch (error) {
+      /** Storage errors can name buckets or credentials, and this error's message reaches the model. */
+      logger.error('[MCPAttachments] Failed to sign a download URL:', getSafeErrorMetadata(error));
+      throw new MCPAttachmentError('url_unavailable', ref);
+    }
     if (!result.ok) {
       throw new MCPAttachmentError('unsupported_source', ref);
     }
@@ -258,7 +273,7 @@ export function createMCPAttachmentRefs(
     isSameId(file.user, params.owner.userId) &&
     (file.tenantId ?? null) === (params.owner.tenantId ?? null) &&
     !!file.source &&
-    !!params.getStrategyFunctions(file.source).getDownloadURL;
+    supportsDownloadURL(file.source, params.getStrategyFunctions);
 
   const add = (file: AttachmentFile, earlier: boolean): boolean => {
     seen.add(file.file_id);

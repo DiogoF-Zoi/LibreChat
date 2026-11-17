@@ -5,6 +5,7 @@ import {
 } from 'librechat-data-provider';
 import type { TFile } from 'librechat-data-provider';
 import {
+  supportsDownloadURL,
   isDirectDownloadSource,
   resolveFileDownloadURL,
   resolveDownloadURLExpiry,
@@ -27,6 +28,28 @@ const s3File = {
   source: FileSources.s3,
   type: 'application/pdf',
 } as TFile;
+
+describe('supportsDownloadURL', () => {
+  it('accepts a source whose strategy can sign', () => {
+    expect(supportsDownloadURL(FileSources.s3, createStrategy().getStrategyFunctions)).toBe(true);
+  });
+
+  it.each([FileSources.text, FileSources.openai, FileSources.azure])(
+    'rejects %s even when its strategy resolves to a signer',
+    (source) => {
+      expect(supportsDownloadURL(source, createStrategy().getStrategyFunctions)).toBe(false);
+    },
+  );
+
+  it('rejects a source without getDownloadURL or one the selector does not know', () => {
+    expect(supportsDownloadURL(FileSources.azure_blob, () => ({}))).toBe(false);
+    expect(
+      supportsDownloadURL('legacy', () => {
+        throw new Error('Invalid file source');
+      }),
+    ).toBe(false);
+  });
+});
 
 describe('resolveFileDownloadURL', () => {
   it('signs through the file source strategy with the requested expiry', async () => {

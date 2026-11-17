@@ -41,8 +41,15 @@ const localSigner = jest.fn((params: DownloadURLParams) =>
   getSignedDownloadURL({ ...params, secret: SECRET, baseURL: BASE_URL, now: NOW }),
 );
 
-const getStrategyFunctions = (source: string) =>
-  source === FileSources.local || source === FileSources.s3 ? { getDownloadURL: localSigner } : {};
+/** Mirrors the app's selector: text files share the local strategy, an unknown source throws. */
+const getStrategyFunctions = (source: string) => {
+  if (source === 'legacy') {
+    throw new Error(`Invalid file source: ${source}`);
+  }
+  return [FileSources.local, FileSources.s3, FileSources.text].includes(source as FileSources)
+    ? { getDownloadURL: localSigner }
+    : {};
+};
 
 const buildRefs = (
   overrides: Partial<Parameters<typeof createMCPAttachmentRefs>[0]> = {},
@@ -102,6 +109,12 @@ describe('createMCPAttachmentRefs', () => {
     expect(buildRefs({ files: [makeFile({ source: FileSources.text })] })).toBeUndefined();
     expect(buildRefs({ files: [makeFile({ source: FileSources.azure_blob })] })).toBeUndefined();
     expect(buildRefs({ files: [makeFile({ source: undefined })] })).toBeUndefined();
+  });
+
+  it('skips files with an unrecognized source instead of failing the turn', () => {
+    const odd = makeFile({ source: 'legacy' as FileSources });
+    expect(() => buildRefs({ files: [odd, makeFile()] })).not.toThrow();
+    expect(buildRefs({ files: [odd, makeFile()] })?.size).toBe(1);
   });
 
   it('returns undefined when the request attached nothing', () => {
@@ -559,15 +572,17 @@ describe('callWithMCPAttachments', () => {
     await expect(promise).rejects.not.toThrow('signature=');
   });
 
-  it('propagates signing failures without exposing them as URLs', async () => {
-    localSigner.mockRejectedValueOnce(new Error('KMS unavailable'));
-    await expect(
-      callWithMCPAttachments({
-        refs: buildRefs(),
-        serverConfig: excel,
-        toolArguments: { file_urls: [REF] },
-        call: jest.fn(),
-      }),
-    ).rejects.toThrow('KMS unavailable');
+  it('reports a signing failure as a coded error that hides the storage detail', async () => {
+    localSigner.mockRejectedValueOnce(new Error('KMS unavailable for bucket secret-bucket'));
+    const call = jest.fn();
+    const promise = callWithMCPAttachments({
+      refs: buildRefs(),
+      serverConfig: excel,
+      toolArguments: { file_urls: [REF] },
+      call,
+    });
+    await expect(promise).rejects.toMatchObject({ code: 'url_unavailable' });
+    await expect(promise).rejects.not.toThrow(/KMS|secret-bucket/);
+    expect(call).not.toHaveBeenCalled();
   });
 });

@@ -43,6 +43,25 @@ export function resolveDownloadURLExpiry(expiresIn: number | undefined): number 
 }
 
 /**
+ * Whether a source's bytes can be reached through a signed URL, without signing one. Text files
+ * resolve to the local strategy but their content lives in the database, and an unrecognized
+ * legacy source makes the strategy lookup throw; both count as unsupported.
+ */
+export function supportsDownloadURL(
+  source: string,
+  getStrategyFunctions: FileDownloadURLRequest['getStrategyFunctions'],
+): boolean {
+  if (checkOpenAIStorage(source) || source === FileSources.text) {
+    return false;
+  }
+  try {
+    return !!getStrategyFunctions(source).getDownloadURL;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Signs a short-lived, read-only URL through the file's storage strategy.
  * Sources without `getDownloadURL` resolve to `unsupported_source`; signing failures throw.
  */
@@ -57,8 +76,7 @@ export async function resolveFileDownloadURL({
   if (checkOpenAIStorage(source)) {
     return { ok: false, error: { code: file.model ? 'unsupported_source' : 'missing_model' } };
   }
-  /** Text files resolve to the local strategy but their content lives in the database. */
-  if (source === FileSources.text) {
+  if (!supportsDownloadURL(source, getStrategyFunctions)) {
     return { ok: false, error: { code: 'unsupported_source' } };
   }
 
