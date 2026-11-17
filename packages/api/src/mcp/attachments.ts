@@ -202,7 +202,7 @@ export class MCPAttachmentRefs {
       );
     return [
       '# Attached Files',
-      "Files the user attached in this conversation, the latest message's first. When a tool from an accepting server asks for file URLs (for example a `file_urls` argument), pass only the `attachment://…` token, without the file name, type or any punctuation after it, in place of the URL. It is exchanged for a short-lived download link only when the tool runs. A server may not keep a file between calls, so when a tool needs a file again or reports that it is gone, pass its reference again. A file keeps the same reference in every turn, but only the files listed here can be used.",
+      "Files the user attached in this conversation, the latest message's first. When a tool from an accepting server needs the URL of one of these files in an argument, pass only the `attachment://…` token, without the file name, type or any punctuation after it, in place of the URL. It is exchanged for a short-lived download link only when the tool runs. A server may not keep a file between calls, so when a tool needs a file again or reports that it is gone, pass its reference again. A file keeps the same reference in every turn, but only the files listed here can be used.",
       ...lines,
     ].join('\n');
   }

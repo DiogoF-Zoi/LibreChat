@@ -514,6 +514,24 @@ describe('callWithMCPAttachments', () => {
     expect(serialized).toContain(REF);
   });
 
+  it('replaces the URL in an app snapshot that records the call arguments', async () => {
+    const result = await callWithMCPAttachments({
+      refs: buildRefs(),
+      serverConfig: excel,
+      toolArguments: { file_urls: [REF] },
+      call: async (resolved) => [
+        'ok',
+        { ui_resources: { data: [{ toolName: 'open', toolArgs: resolved }] } },
+      ],
+    });
+
+    expect(JSON.stringify(result)).not.toContain('signature=');
+    expect(result).toEqual([
+      'ok',
+      { ui_resources: { data: [{ toolName: 'open', toolArgs: { file_urls: [REF] } }] } },
+    ]);
+  });
+
   it('keeps a failed tool result marked as an error after scrubbing it', async () => {
     const result = await callWithMCPAttachments({
       refs: buildRefs(),

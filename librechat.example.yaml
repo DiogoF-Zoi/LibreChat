@@ -772,9 +772,9 @@ actions:
 #       # Persisted agent that owns the executing tool, including a subagent's own tools.
 #       # Empty for plain chat or an ephemeral agent. Available on operator-defined servers.
 #       X-Agent-Id: "{{LIBRECHAT_AGENT_ID}}"
-#   excel:
+#   documents:
 #     type: streamable-http
-#     url: https://excel-mcp.example.com/mcp
+#     url: https://documents-mcp.example.com/mcp
 #     # Lets this server's tools read the files a user attaches in the conversation. The model
 #     # sees `attachment://…` references; each is swapped for a freshly signed download URL only in
 #     # the outbound tool call, so URLs never reach the model, traces or stored messages. Files must
@@ -782,8 +782,8 @@ actions:
 #     # server must reach DOMAIN_SERVER. Only librechat.yaml can enable this; user-created servers cannot.
 #     attachmentUrls:
 #       mimeTypes: # exact or `type/*`; omit to offer every signable file
-#         - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-#         - application/vnd.ms-excel
+#         - application/pdf
+#         - text/*
 #       expiry: 300 # seconds; defaults to fileConfig.downloadUrlExpiry, capped at 3600
 #       minTtl: 60 # seconds a URL must have left when handed to the server
 #       # Files from earlier messages also offered, most recent first, so a tool can be handed a
