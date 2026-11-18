@@ -33,16 +33,10 @@ describe('resolveLocalDownloadPath', () => {
     await fs.rm(base, { recursive: true, force: true });
   });
 
-  it('resolves an upload to its real path with the stats a validator needs', async () => {
-    const result = await resolveLocalDownloadPath('/uploads/user-1/report.xlsx', roots);
-
-    expect(result).toEqual({
+  it('resolves an upload to its real path', async () => {
+    expect(await resolveLocalDownloadPath('/uploads/user-1/report.xlsx', roots)).toEqual({
       ok: true,
-      value: {
-        path: path.join(roots.uploads, 'user-1', 'report.xlsx'),
-        size: 6,
-        mtimeMs: expect.any(Number),
-      },
+      value: path.join(roots.uploads, 'user-1', 'report.xlsx'),
     });
   });
 
@@ -54,16 +48,12 @@ describe('resolveLocalDownloadPath', () => {
       roots,
     );
 
-    expect(result.ok && result.value.path).toBe(
-      path.join(roots.uploads, 'user-1', 'Q3 #1 50%.xlsx'),
-    );
+    expect(result.ok && result.value).toBe(path.join(roots.uploads, 'user-1', 'Q3 #1 50%.xlsx'));
   });
 
   it('resolves an image under the image root, ignoring a cache-busting suffix', async () => {
     const result = await resolveLocalDownloadPath('/images/user-1/chart.png?v=123', roots);
-    expect(result.ok && result.value.path).toBe(
-      path.join(roots.imageOutput, 'user-1', 'chart.png'),
-    );
+    expect(result.ok && result.value).toBe(path.join(roots.imageOutput, 'user-1', 'chart.png'));
   });
 
   it.each([
@@ -113,7 +103,7 @@ describe('resolveLocalDownloadPath', () => {
     );
 
     const result = await resolveLocalDownloadPath('/uploads/user-1/link/data.csv', roots);
-    expect(result.ok && result.value.path).toBe(path.join(roots.uploads, 'shared', 'data.csv'));
+    expect(result.ok && result.value).toBe(path.join(roots.uploads, 'shared', 'data.csv'));
   });
 
   it.each([

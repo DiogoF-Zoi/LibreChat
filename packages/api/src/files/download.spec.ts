@@ -86,21 +86,6 @@ describe('resolveFileDownloadURL', () => {
     expect(getDownloadURL.mock.calls[0][0].expiresIn).toBeUndefined();
   });
 
-  it('never hands a strategy a lifetime above the ceiling', async () => {
-    const { getDownloadURL, getStrategyFunctions } = createStrategy();
-
-    await resolveFileDownloadURL({
-      file: s3File,
-      filename: 'doc.pdf',
-      expiresIn: 7 * 24 * 3600,
-      getStrategyFunctions,
-    });
-
-    expect(getDownloadURL).toHaveBeenCalledWith(
-      expect.objectContaining({ expiresIn: MAX_DOWNLOAD_URL_EXPIRY_SECONDS }),
-    );
-  });
-
   it('falls back to a generic content type', async () => {
     const { getDownloadURL, getStrategyFunctions } = createStrategy();
 

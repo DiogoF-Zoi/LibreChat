@@ -309,8 +309,6 @@ export type AvatarUploadResponse = {
 
 export type FileDownloadURLResponse = {
   url: string;
-  /** ISO 8601 instant after which `url` stops working. */
-  expiresAt: string;
   filename: string;
   type: string;
   metadata: Partial<TFile>;

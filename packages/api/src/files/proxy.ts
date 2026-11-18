@@ -2,26 +2,13 @@ import { FileSources } from 'librechat-data-provider';
 import { logger, runAsSystem } from '@librechat/data-schemas';
 import type { AppConfig } from '@librechat/data-schemas';
 import type { RequestHandler, Response } from 'express';
-import type { LocalDownloadFile } from '~/storage/local';
 import type { GetAppConfigOptions } from '~/app/service';
 import type { ServerRequest } from '~/types/http';
+import { formatContentDisposition } from '~/storage/disposition';
 import { resolveLocalDownloadPath } from '~/storage/local';
 import { getSafeErrorMetadata } from '~/utils/errors';
+import { stripFileIdPrefix } from '~/storage/path';
 import { verifySignedDownload } from './signed';
-
-/** Only these sources issue proxy URLs, so no other record is served even under a valid signature. */
-const PROXY_DOWNLOAD_SOURCES = new Set<string>([FileSources.local]);
-
-const FILE_BODY_HEADERS = [
-  'Accept-Ranges',
-  'Content-Disposition',
-  'Content-Length',
-  'Content-Range',
-  'Content-Security-Policy',
-  'Content-Type',
-  'ETag',
-  'Last-Modified',
-];
 
 export interface SignedDownloadFile {
   _id?: { toString(): string } | string;
@@ -35,47 +22,31 @@ export interface SignedDownloadHandlerDeps {
   getSecret: () => string | undefined;
   getFiles: (filter: { _id: string }) => Promise<SignedDownloadFile[] | null>;
   getAppConfig: (options: GetAppConfigOptions) => Promise<AppConfig>;
-  getContentDisposition: (filename: string) => string;
 }
 
-type SendFileError = Error & {
-  code?: string;
-  status?: number;
-  statusCode?: number;
-  headers?: Record<string, string>;
-};
+type SendFileError = Error & { code?: string; status?: number; statusCode?: number };
 
 const sendNotFound = (res: Response) =>
   res.status(404).json({ error: 'Not Found', code: 'file_not_found' });
 
-const removeFileBodyHeaders = (res: Response) =>
-  FILE_BODY_HEADERS.forEach((name) => res.removeHeader(name));
-
-/** Strong validator from size and mtime (nginx's scheme), so `If-Range` resumes only an unchanged file. */
-const getStrongETag = ({ size, mtimeMs }: LocalDownloadFile): string =>
-  `"${size.toString(16)}-${Math.floor(mtimeMs).toString(16)}"`;
-
 /**
- * `res.sendFile` handles ranges, conditional requests and HEAD. A failure after the headers are
- * sent destroys the connection, so a truncated body is never mistaken for the whole file.
+ * `res.sendFile` handles ranges, conditional requests and HEAD, and applies `headers` only when it
+ * serves the file, so an error response never carries them. A failure after the headers are sent
+ * destroys the connection, so a truncated body is never mistaken for the whole file.
  */
-function sendLocalFile(res: Response, local: LocalDownloadFile, fileId: string): Promise<void> {
+function sendLocalFile(
+  res: Response,
+  filePath: string,
+  headers: Record<string, string>,
+  fileId: string,
+): Promise<void> {
   return new Promise((resolve) => {
     /** `dotfiles: 'allow'` is safe: the path is already confined to the storage roots. */
-    const options = {
-      acceptRanges: true,
-      cacheControl: false,
-      lastModified: true,
-      dotfiles: 'allow' as const,
-    };
-    res.sendFile(local.path, options, (sendError?: Error) => {
+    const options = { headers, cacheControl: false, dotfiles: 'allow' as const };
+    res.sendFile(filePath, options, (sendError?: Error) => {
       resolve();
       const error = sendError as SendFileError | undefined;
-      if (!error) {
-        return;
-      }
-      if (error.code === 'ECONNABORTED') {
-        logger.debug(`[signedDownload] Client disconnected during download of file ${fileId}`);
+      if (!error || error.code === 'ECONNABORTED') {
         return;
       }
       if (res.headersSent) {
@@ -83,11 +54,9 @@ function sendLocalFile(res: Response, local: LocalDownloadFile, fileId: string):
         res.destroy();
         return;
       }
-
-      removeFileBodyHeaders(res);
       const status = error.status ?? error.statusCode;
+      /** Range and precondition failures keep the `Content-Range` the file server set. */
       if (status === 412 || status === 416) {
-        Object.entries(error.headers ?? {}).forEach(([name, value]) => res.setHeader(name, value));
         res.status(status).end();
         return;
       }
@@ -111,7 +80,6 @@ export function createSignedDownloadHandler({
   getSecret,
   getFiles,
   getAppConfig,
-  getContentDisposition,
 }: SignedDownloadHandlerDeps): RequestHandler {
   const handler = async (req: ServerRequest, res: Response): Promise<void> => {
     res.setHeader('Cache-Control', 'no-store');
@@ -126,7 +94,6 @@ export function createSignedDownloadHandler({
       const { id: requestedId } = req.params as { id?: string };
       const verification = verifySignedDownload({
         secret,
-        method: req.method,
         id: requestedId,
         expires: req.query.expires,
         signature: req.query.signature,
@@ -139,8 +106,8 @@ export function createSignedDownloadHandler({
 
       const { id } = verification.value;
       const [file] = (await runAsSystem(async () => getFiles({ _id: id }))) ?? [];
-      const source = file?.source ?? FileSources.local;
-      if (!file || !PROXY_DOWNLOAD_SOURCES.has(source)) {
+      /** Only local storage issues these URLs, so no other record is served under a valid signature. */
+      if (!file || (file.source ?? FileSources.local) !== FileSources.local) {
         sendNotFound(res);
         return;
       }
@@ -161,19 +128,23 @@ export function createSignedDownloadHandler({
         return;
       }
 
-      res.setHeader('Content-Disposition', getContentDisposition(file.filename));
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-      res.setHeader('ETag', getStrongETag(resolved.value));
-      await sendLocalFile(res, resolved.value, file.file_id);
+      await sendLocalFile(
+        res,
+        resolved.value,
+        {
+          'Content-Disposition': formatContentDisposition(stripFileIdPrefix(file.filename)),
+          'Content-Type': 'application/octet-stream',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+        },
+        file.file_id,
+      );
     } catch (error) {
       logger.error('[signedDownload] Error serving signed download:', getSafeErrorMetadata(error));
       if (res.headersSent) {
         res.destroy();
         return;
       }
-      removeFileBodyHeaders(res);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   };

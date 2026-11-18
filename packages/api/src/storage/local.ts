@@ -138,14 +138,9 @@ export interface LocalDownloadRoots {
 
 export type LocalDownloadPathErrorCode = 'not_found' | 'outside_storage';
 
-export interface LocalDownloadFile {
-  path: string;
-  size: number;
-  mtimeMs: number;
-}
-
+/** `value` is the file's real path. */
 export type LocalDownloadPathResult =
-  | { ok: true; value: LocalDownloadFile }
+  | { ok: true; value: string }
   | { ok: false; error: { code: LocalDownloadPathErrorCode } };
 
 /** URL prefixes local storage writes into `filepath` (`saveLocalBuffer`, `uploadLocalFile`). */
@@ -197,10 +192,7 @@ export async function resolveLocalDownloadPath(
       return outsideStorage;
     }
     const stats = await stat(realPath);
-    if (!stats.isFile()) {
-      return notFound;
-    }
-    return { ok: true, value: { path: realPath, size: stats.size, mtimeMs: stats.mtimeMs } };
+    return stats.isFile() ? { ok: true, value: realPath } : notFound;
   } catch (error) {
     if (isMissing(error)) {
       return notFound;

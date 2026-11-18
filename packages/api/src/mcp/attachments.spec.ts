@@ -5,6 +5,7 @@ import {
 } from 'librechat-data-provider';
 import type { MCPAttachmentURLs, TFile } from 'librechat-data-provider';
 import type { DownloadURLParams, DownloadURLResult } from '~/storage/types';
+import type { MCPAttachmentCallParams } from './attachments';
 import {
   MCPAttachmentRefs,
   MCPAttachmentError,
@@ -19,6 +20,7 @@ const BASE_URL = 'https://chat.example.test';
 const NOW = Date.UTC(2026, 10, 5, 12, 0, 0);
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const DOCUMENT_POLICY: MCPAttachmentURLs = { mimeTypes: [XLSX, 'text/csv'] };
+const SIGNED_PATH = '/api/files/signed/65f1c0ffee0123456789abcd';
 
 type TestFile = TFile & { tenantId?: string | null };
 
@@ -68,6 +70,23 @@ const buildRefs = (
 /** The reference the default file is listed under. */
 const REF = buildRefs()!.accepted(DOCUMENT_POLICY)[0].ref;
 
+/** A server call that returns the arguments it received, so a test can read the minted URLs. */
+const echo = () => jest.fn(async (resolved: unknown) => resolved);
+
+/** The `file_urls` the server received on its first call. */
+const sentURLs = (call: jest.Mock): string[] =>
+  (call.mock.calls[0][0] as { file_urls: string[] }).file_urls;
+
+/** Calls the documents server with the default turn and reference unless overridden. */
+const callWith = (overrides: Partial<MCPAttachmentCallParams<unknown>> = {}) =>
+  callWithMCPAttachments<unknown>({
+    refs: buildRefs(),
+    serverConfig: { attachmentUrls: DOCUMENT_POLICY },
+    toolArguments: { file_urls: [REF] },
+    call: echo(),
+    ...overrides,
+  });
+
 beforeEach(() => {
   localSigner.mockClear();
 });
@@ -106,15 +125,16 @@ describe('createMCPAttachmentRefs', () => {
     ).toBe(1);
   });
 
-  it('skips files whose storage cannot sign a download URL', () => {
-    expect(buildRefs({ files: [makeFile({ source: FileSources.text })] })).toBeUndefined();
-    expect(buildRefs({ files: [makeFile({ source: FileSources.azure_blob })] })).toBeUndefined();
-    expect(buildRefs({ files: [makeFile({ source: undefined })] })).toBeUndefined();
+  it.each([
+    ['a text file, whose bytes live in the database', FileSources.text],
+    ['storage that cannot sign', FileSources.azure_blob],
+    ['no source', undefined],
+  ])('skips %s', (_label, source) => {
+    expect(buildRefs({ files: [makeFile({ source })] })).toBeUndefined();
   });
 
   it('skips files with an unrecognized source instead of failing the turn', () => {
     const odd = makeFile({ source: 'legacy' as FileSources });
-    expect(() => buildRefs({ files: [odd, makeFile()] })).not.toThrow();
     expect(buildRefs({ files: [odd, makeFile()] })?.size).toBe(1);
   });
 
@@ -190,25 +210,21 @@ describe('earlier conversation files', () => {
     const turnOne = buildRefs({ files: [earlier], requestFileIds: [earlier.file_id] });
     const stored = refFor(await turnOne!.formatContext(['documents']), 'earlier-4.xlsx');
 
-    const turnTwo = buildRefs({ files: [], requestFileIds: [], conversationFiles: [earlier] });
-    const call = jest.fn(async (resolved: unknown) => resolved);
-    await callWithMCPAttachments({
-      refs: turnTwo,
-      serverConfig: { attachmentUrls: DOCUMENT_POLICY },
+    const call = echo();
+    await callWith({
+      refs: buildRefs({ files: [], requestFileIds: [], conversationFiles: [earlier] }),
       toolArguments: { file_urls: [stored] },
       call,
     });
-    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
-    expect(new URL(resolved.file_urls[0]).pathname).toContain('/api/files/signed/');
+    expect(new URL(sentURLs(call)[0]).pathname).toContain('/api/files/signed/');
   });
 
   it('derives a different reference for the same file under another owner', () => {
-    const own = buildRefs()!.accepted(DOCUMENT_POLICY)[0].ref;
     const other = buildRefs({
       files: [makeFile({ user: 'user-2' })],
       owner: { userId: 'user-2' },
     })!.accepted(DOCUMENT_POLICY)[0].ref;
-    expect(other).not.toBe(own);
+    expect(other).not.toBe(REF);
   });
 
   it('builds references when only earlier messages have files', () => {
@@ -276,28 +292,22 @@ describe('earlier conversation files', () => {
       conversationFiles: [earlierFile(1), earlierFile(2)],
     });
     const context = await refs!.formatContext(['documents']);
-    const newest = refFor(context, 'earlier-1.xlsx');
-    const older = refFor(context, 'earlier-2.xlsx');
     const limited = { attachmentUrls: { ...DOCUMENT_POLICY, conversationFiles: 1 } };
 
-    const call = jest.fn(async (resolved: unknown) => resolved);
-    await callWithMCPAttachments({
+    const call = echo();
+    await callWith({
       refs,
       serverConfig: limited,
-      toolArguments: { file_urls: [newest] },
+      toolArguments: { file_urls: [refFor(context, 'earlier-1.xlsx')] },
       call,
     });
-    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
-    expect(new URL(resolved.file_urls[0]).pathname).toBe(
-      '/api/files/signed/65f1c0ffee01234567890001',
-    );
+    expect(new URL(sentURLs(call)[0]).pathname).toBe('/api/files/signed/65f1c0ffee01234567890001');
 
     await expect(
-      callWithMCPAttachments({
+      callWith({
         refs,
         serverConfig: limited,
-        toolArguments: { file_urls: [older] },
-        call: jest.fn(),
+        toolArguments: { file_urls: [refFor(context, 'earlier-2.xlsx')] },
       }),
     ).rejects.toMatchObject({ code: 'unknown_reference' });
   });
@@ -348,127 +358,88 @@ describe('MCPAttachmentRefs.formatContext', () => {
 });
 
 describe('callWithMCPAttachments', () => {
-  const documents = { attachmentUrls: DOCUMENT_POLICY };
-
   it.each([
     ['a single string field', { source: REF, page: 2 }],
     ['a nested object field', { input: { document: { href: REF } } }],
     ['an array of objects', { items: [{ uri: REF }, { uri: 'https://example.test/kept' }] }],
   ])('resolves a reference in %s, whatever the tool schema calls it', async (_name, args) => {
-    const call = jest.fn(async (resolved: unknown) => resolved);
-    await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: args,
-      call,
-    });
+    const call = echo();
+    await callWith({ toolArguments: args, call });
     const [resolved] = call.mock.calls[0];
     const url = JSON.stringify(resolved).match(/https:\/\/chat[^"]+/)?.[0];
-    expect(url).toMatch(`${BASE_URL}/api/files/signed/65f1c0ffee0123456789abcd?expires=`);
+    expect(url).toMatch(`${BASE_URL}${SIGNED_PATH}?expires=`);
     /** Only the reference changed; every other value and key is passed through as sent. */
     expect(resolved).toEqual(JSON.parse(JSON.stringify(args).replace(REF, url!)));
   });
 
   it('swaps references for genuine signed URLs without mutating the arguments', async () => {
     const args = { file_urls: [REF], nested: { keep: 'attachment-like text' } };
-    const call = jest.fn(async (resolved: unknown) => resolved);
+    const call = echo();
 
-    const sent = (await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: args,
-      call,
-    })) as { file_urls: string[] };
+    const sent = await callWith({ toolArguments: args, call });
 
     expect(args.file_urls).toEqual([REF]);
-    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
-    const url = new URL(resolved.file_urls[0]);
-    expect(url.pathname).toBe('/api/files/signed/65f1c0ffee0123456789abcd');
+    const url = new URL(sentURLs(call)[0]);
+    expect(url.pathname).toBe(SIGNED_PATH);
     const verification = verifySignedDownload({
       secret: SECRET,
-      method: 'GET',
       id: url.pathname.split('/').pop(),
       expires: url.searchParams.get('expires'),
       signature: url.searchParams.get('signature'),
       now: NOW,
     });
     expect(verification).toEqual({ ok: true, value: { id: '65f1c0ffee0123456789abcd' } });
-    expect(sent.file_urls).toEqual([REF]);
+    expect(sent).toEqual(args);
   });
 
   it.each([
     ['a copied list line', `${REF}: "Q3 Sales.xlsx"`],
     ['trailing whitespace', `${REF} (Q3 Sales.xlsx)`],
   ])('resolves the reference at the start of %s', async (_name, sent) => {
-    const call = jest.fn(async (resolved: unknown) => resolved);
-    await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [sent, REF] },
-      call,
-    });
-    const [resolved] = call.mock.calls[0] as [{ file_urls: string[] }];
-    expect(resolved.file_urls[0]).toBe(resolved.file_urls[1]);
-    expect(new URL(resolved.file_urls[0]).pathname).toBe(
-      '/api/files/signed/65f1c0ffee0123456789abcd',
-    );
+    const call = echo();
+    await callWith({ toolArguments: { file_urls: [sent, REF] }, call });
+    const [first, second] = sentURLs(call);
+    expect(first).toBe(second);
+    expect(new URL(first).pathname).toBe(SIGNED_PATH);
     expect(localSigner).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    ['extra id characters', `${REF}0`],
-    ['a path after the reference', `${REF}/other`],
-    ['a prefix of the reference', REF.slice(0, -1)],
-  ])('does not treat %s as a reference', async (_name, sent) => {
-    const call = jest.fn();
-    await expect(
-      callWithMCPAttachments({
-        refs: buildRefs(),
-        serverConfig: documents,
-        toolArguments: { file_urls: [sent] },
-        call,
-      }),
-    ).rejects.toMatchObject({ code: 'unknown_reference' });
-    expect(call).not.toHaveBeenCalled();
-  });
-
   it('mints once per reference and signs the clean file name', async () => {
-    await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF, REF] },
-      call: async () => 'ok',
-    });
+    await callWith({ toolArguments: { file_urls: [REF, REF] } });
     expect(localSigner).toHaveBeenCalledTimes(1);
     expect(localSigner.mock.calls[0][0]).toMatchObject({ customFilename: 'Q3 Sales.xlsx' });
   });
 
+  it('resolves and scrubs references nested at any depth', async () => {
+    const nest = (value: unknown, depth: number): unknown =>
+      depth === 0 ? value : { inner: nest(value, depth - 1) };
+    const call = echo();
+
+    const result = await callWith({ toolArguments: nest(REF, 40), call });
+
+    expect(JSON.stringify(call.mock.calls[0][0])).toContain(SIGNED_PATH);
+    expect(result).toEqual(nest(REF, 40));
+  });
+
   it('leaves arguments alone for servers that did not opt in', async () => {
     const args = { file_urls: [REF] };
-    const call = jest.fn(async (resolved: unknown) => resolved);
-    await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: {},
-      toolArguments: args,
-      call,
-    });
+    const call = echo();
+    await callWith({ serverConfig: {}, toolArguments: args, call });
     expect(call).toHaveBeenCalledWith(args);
     expect(localSigner).not.toHaveBeenCalled();
   });
 
   it.each([
+    ['extra id characters', buildRefs, `${REF}0`],
+    ['a path after the reference', buildRefs, `${REF}/other`],
+    ['a prefix of the reference', buildRefs, REF.slice(0, -1)],
     ['an unknown reference', buildRefs, 'attachment://000000000000'],
     ['a reference to a file this turn does not list', buildRefs, 'attachment://ffffffff/1'],
     ['a turn without attachments', () => undefined, REF],
     ['a cloned reference table', () => ({ ...buildRefs() }), REF],
   ])('rejects %s before calling the server', async (_name, makeRefs, ref) => {
     const call = jest.fn();
-    const promise = callWithMCPAttachments({
-      refs: makeRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [ref] },
-      call,
-    });
+    const promise = callWith({ refs: makeRefs(), toolArguments: { file_urls: [ref] }, call });
     await expect(promise).rejects.toMatchObject({ code: 'unknown_reference' });
     await expect(promise).rejects.toBeInstanceOf(MCPAttachmentError);
     expect(call).not.toHaveBeenCalled();
@@ -476,12 +447,7 @@ describe('callWithMCPAttachments', () => {
 
   it('rejects a file type the server does not accept', async () => {
     await expect(
-      callWithMCPAttachments({
-        refs: buildRefs({ files: [makeFile({ type: 'image/png' })] }),
-        serverConfig: documents,
-        toolArguments: { file_urls: [REF] },
-        call: jest.fn(),
-      }),
+      callWith({ refs: buildRefs({ files: [makeFile({ type: 'image/png' })] }) }),
     ).rejects.toMatchObject({ code: 'unsupported_type' });
   });
 
@@ -490,24 +456,14 @@ describe('callWithMCPAttachments', () => {
       url: `${BASE_URL}/short?signature=x`,
       expiresAt: new Date(NOW + 30_000),
     } satisfies DownloadURLResult);
-    const promise = callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF] },
-      call: jest.fn(),
-    });
+    const promise = callWith({ call: jest.fn() });
     await expect(promise).rejects.toMatchObject({ code: 'insufficient_ttl' });
     await expect(promise).rejects.not.toThrow(/short\?signature/);
   });
 
   it('caps the minimum lifetime at the requested expiry', async () => {
     const call = jest.fn(async () => 'ok');
-    await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: { attachmentUrls: { ...DOCUMENT_POLICY, expiry: 30 } },
-      toolArguments: { file_urls: [REF] },
-      call,
-    });
+    await callWith({ serverConfig: { attachmentUrls: { ...DOCUMENT_POLICY, expiry: 30 } }, call });
     expect(localSigner.mock.calls[0][0].expiresIn).toBe(30);
     expect(call).toHaveBeenCalled();
   });
@@ -516,95 +472,73 @@ describe('callWithMCPAttachments', () => {
     [{ expiry: 900 }, 600, 900],
     [{}, 600, 600],
     [{}, undefined, 300],
-    [{}, MAX_DOWNLOAD_URL_EXPIRY_SECONDS * 10, MAX_DOWNLOAD_URL_EXPIRY_SECONDS],
   ])(
     'uses server expiry, then fileConfig, then 300s (%j, %s)',
     async (policy, fallback, expected) => {
-      await callWithMCPAttachments({
+      await callWith({
         refs: buildRefs({ defaultExpiry: fallback }),
         serverConfig: { attachmentUrls: policy },
-        toolArguments: { file_urls: [REF] },
-        call: async () => 'ok',
       });
       expect(localSigner.mock.calls[0][0].expiresIn).toBe(expected);
     },
   );
 
-  it('replaces any echoed URL in the result with its reference', async () => {
-    const result = await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF] },
-      call: async (resolved) => {
-        const url = (resolved as { file_urls: string[] }).file_urls[0];
-        const query = url.slice(url.indexOf('?'));
-        return [
-          `Failed to load ${url}`,
-          [{ type: 'text', text: JSON.stringify({ source: url.replace(/\//g, '\\/') }) }],
-          { note: `query ${query}` },
-        ];
-      },
-    });
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain('signature=');
-    expect(serialized).not.toContain('/api/files/signed');
-    expect(serialized).toContain(REF);
+  it('never signs for longer than the lifetime ceiling', async () => {
+    await callWith({ refs: buildRefs({ defaultExpiry: MAX_DOWNLOAD_URL_EXPIRY_SECONDS * 10 }) });
+    expect(localSigner.mock.calls[0][0].expiresIn).toBe(MAX_DOWNLOAD_URL_EXPIRY_SECONDS);
   });
 
-  it('replaces the URL in an app snapshot that records the call arguments', async () => {
-    const result = await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF] },
-      call: async (resolved) => [
-        'ok',
-        { ui_resources: { data: [{ toolName: 'open', toolArgs: resolved }] } },
+  describe('replaces an echoed URL with its reference', () => {
+    const urlOf = (resolved: unknown) => (resolved as { file_urls: string[] }).file_urls[0];
+
+    it.each([
+      [
+        'in the result, as is, JSON-escaped or as its query alone',
+        (resolved: unknown) => {
+          const url = urlOf(resolved);
+          return [
+            `Failed to load ${url}`,
+            [{ type: 'text', text: JSON.stringify({ source: url.replace(/\//g, '\\/') }) }],
+            { note: `query ${url.slice(url.indexOf('?'))}` },
+          ];
+        },
       ],
+      [
+        'in an app snapshot that records the call arguments',
+        (resolved: unknown) => ['ok', { ui_resources: { data: [{ toolArgs: resolved }] } }],
+      ],
+    ])('%s', async (_name, respond) => {
+      const result = await callWith({ call: async (resolved) => respond(resolved) });
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain('signature=');
+      expect(serialized).not.toContain('/api/files/signed');
+      expect(serialized).toContain(REF);
     });
 
-    expect(JSON.stringify(result)).not.toContain('signature=');
-    expect(result).toEqual([
-      'ok',
-      { ui_resources: { data: [{ toolName: 'open', toolArgs: { file_urls: [REF] } }] } },
-    ]);
-  });
-
-  it('keeps a failed tool result marked as an error after scrubbing it', async () => {
-    const result = await callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF] },
-      call: async (resolved) => {
-        const url = (resolved as { file_urls: string[] }).file_urls[0];
-        return markMCPToolResultError([`Could not read ${url}`, undefined], true);
-      },
+    it('and keeps a failed tool result marked as an error', async () => {
+      const result = await callWith({
+        call: async (resolved) =>
+          markMCPToolResultError([`Could not read ${urlOf(resolved)}`, undefined], true),
+      });
+      expect(isMCPToolResultError(result as object)).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('signature=');
     });
-    expect(isMCPToolResultError(result)).toBe(true);
-    expect(JSON.stringify(result)).not.toContain('signature=');
-  });
 
-  it('scrubs an echoed URL from a thrown error message', async () => {
-    const promise = callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF] },
-      call: async (resolved) => {
-        throw new Error(`Invalid input: ${(resolved as { file_urls: string[] }).file_urls[0]}`);
-      },
+    it('in a thrown error message', async () => {
+      const promise = callWith({
+        call: async (resolved) => {
+          throw new Error(`Invalid input: ${urlOf(resolved)}`);
+        },
+      });
+      await expect(promise).rejects.toThrow(`Invalid input: ${REF}`);
+      await expect(promise).rejects.not.toThrow('signature=');
     });
-    await expect(promise).rejects.toThrow(`Invalid input: ${REF}`);
-    await expect(promise).rejects.not.toThrow('signature=');
   });
 
   it('reports a signing failure as a coded error that hides the storage detail', async () => {
     localSigner.mockRejectedValueOnce(new Error('KMS unavailable for bucket secret-bucket'));
     const call = jest.fn();
-    const promise = callWithMCPAttachments({
-      refs: buildRefs(),
-      serverConfig: documents,
-      toolArguments: { file_urls: [REF] },
-      call,
-    });
+    const promise = callWith({ call });
     await expect(promise).rejects.toMatchObject({ code: 'url_unavailable' });
     await expect(promise).rejects.not.toThrow(/KMS|secret-bucket/);
     expect(call).not.toHaveBeenCalled();

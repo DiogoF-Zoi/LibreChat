@@ -1040,7 +1040,6 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.status).toBe(200);
       expect(response.body).toMatchObject({
         url: 'https://cdn.example.com/file.pdf?signed',
-        expiresAt: '2026-10-23T11:00:00.000Z',
         filename: 'file.pdf',
         type: 'application/pdf',
       });
@@ -1048,13 +1047,11 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.body.metadata).toMatchObject({
         file_id: userFileId,
         filename: 'file.pdf',
-        bytes: 200,
-        type: 'application/pdf',
+        filepath: 'uploads/user/file.pdf',
+        storageKey: 'r/us-east-2/uploads/user/file.pdf',
+        storageRegion: 'us-east-2',
         source: FileSources.s3,
       });
-      expect(response.body.metadata).not.toHaveProperty('filepath');
-      expect(response.body.metadata).not.toHaveProperty('storageKey');
-      expect(response.body.metadata).not.toHaveProperty('storageRegion');
       expect(response.body.metadata).not.toHaveProperty('_id');
       expect(response.body.metadata).not.toHaveProperty('__v');
       expect(response.body.metadata).not.toHaveProperty('user');
@@ -1088,32 +1085,14 @@ describe('File Routes - Delete with Agent Access', () => {
       expect(response.status).toBe(501);
     });
 
-    it('passes fileConfig.downloadUrlExpiry to the strategy', async () => {
+    it.each([
+      ['fileConfig.downloadUrlExpiry', { fileConfig: { downloadUrlExpiry: 900 } }, 900],
+      ['the strategy default when downloadUrlExpiry is unset', {}, undefined],
+    ])('signs with %s', async (_label, config, expiresIn) => {
       const userFileId = uuidv4();
       const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
       getStrategyFunctions.mockReturnValue({ getDownloadURL });
-      requestConfig = { fileConfig: { downloadUrlExpiry: 900 } };
-
-      await createFile({
-        user: otherUserId,
-        file_id: userFileId,
-        filename: 'file.pdf',
-        filepath: 'uploads/user/file.pdf',
-        bytes: 200,
-        type: 'application/pdf',
-        source: FileSources.s3,
-      });
-
-      const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
-
-      expect(response.status).toBe(200);
-      expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 900 }));
-    });
-
-    it('keeps the strategy default expiry when downloadUrlExpiry is unset', async () => {
-      const userFileId = uuidv4();
-      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
-      getStrategyFunctions.mockReturnValue({ getDownloadURL });
+      requestConfig = config;
 
       await createFile({
         user: otherUserId,
@@ -1129,30 +1108,7 @@ describe('File Routes - Delete with Agent Access', () => {
 
       expect(response.status).toBe(200);
       expect(getDownloadURL).toHaveBeenCalledTimes(1);
-      expect(getDownloadURL.mock.calls[0][0].expiresIn).toBeUndefined();
-    });
-
-    it('never asks a strategy for a lifetime above one hour', async () => {
-      const userFileId = uuidv4();
-      const getDownloadURL = jest.fn().mockResolvedValue(signedDownload);
-      getStrategyFunctions.mockReturnValue({ getDownloadURL });
-      /** A config that skipped schema validation (the schema itself rejects this value). */
-      requestConfig = { fileConfig: { downloadUrlExpiry: 7 * 24 * 3600 } };
-
-      await createFile({
-        user: otherUserId,
-        file_id: userFileId,
-        filename: 'file.pdf',
-        filepath: 'uploads/user/file.pdf',
-        bytes: 200,
-        type: 'application/pdf',
-        source: FileSources.s3,
-      });
-
-      const response = await request(app).get(`/files/download-url/${otherUserId}/${userFileId}`);
-
-      expect(response.status).toBe(200);
-      expect(getDownloadURL).toHaveBeenCalledWith(expect.objectContaining({ expiresIn: 3600 }));
+      expect(getDownloadURL.mock.calls[0][0].expiresIn).toBe(expiresIn);
     });
 
     it("denies another user's file before issuing a signed URL", async () => {

@@ -775,21 +775,14 @@ actions:
 #   documents:
 #     type: streamable-http
 #     url: https://documents-mcp.example.com/mcp
-#     # Lets this server's tools read the files a user attaches in the conversation. The model
-#     # sees `attachment://…` references; each is swapped for a freshly signed download URL only in
-#     # the outbound tool call, so URLs never reach the model, traces or stored messages. Files must
-#     # be stored where a download URL can be signed (local, S3, CloudFront). For local storage the
-#     # server must reach DOMAIN_SERVER. Only librechat.yaml can enable this; user-created servers cannot.
+#     # Admin-only: the model sees `attachment://…` references, swapped for short-lived signed
+#     # download URLs only in the outbound tool call. Needs local (server reachable at DOMAIN_SERVER),
+#     # S3 or CloudFront storage.
 #     attachmentUrls:
-#       mimeTypes: # exact or `type/*`; omit to offer every signable file
-#         - application/pdf
-#         - text/*
+#       mimeTypes: [application/pdf, text/*] # exact or `type/*`; omit to offer every signable file
 #       expiry: 300 # seconds; defaults to fileConfig.downloadUrlExpiry, capped at 3600
 #       minTtl: 60 # seconds a URL must have left when handed to the server
-#       # Files from earlier messages also offered, most recent first, so a tool can be handed a
-#       # file again when the server kept nothing. 0 = latest message only; default 20, max 100.
-#       # Earlier files are listed only when `resendFiles` is on for the endpoint (the default).
-#       conversationFiles: 20
+#       conversationFiles: 20 # earlier messages' files also offered (needs `resendFiles`); 0-100
 #   puppeteer:
 #     type: stdio
 #     command: npx
@@ -1576,13 +1569,10 @@ endpoints:
 #       fileSizeLimit: 5
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
-#   # Lifetime in seconds of signed file download URLs (S3, CloudFront and local storage). Max 3600.
-#   # Unset, S3 keeps S3_URL_EXPIRY_SECONDS, CloudFront keeps `cloudfront.urlExpiry` and local uses
-#   # 300. MCP attachment URLs (`attachmentUrls`) always use this value or 300, never the S3 setting.
-#   # Local URLs point at DOMAIN_SERVER/api/files/signed/<id> and are signed with a key derived from
-#   # JWT_SECRET, so rotating it invalidates outstanding URLs.
-#   # A URL is a bearer credential until it expires: LibreChat redacts it from its own logs, but proxy
-#   # and CDN access logs record query strings by default, so strip them for /api/files/signed/.
+#   # Lifetime in seconds (max 3600) of signed download URLs. Unset, S3 and CloudFront keep their own
+#   # expiry settings; local storage and MCP `attachmentUrls` use 300. Local URLs are signed with a key
+#   # derived from JWT_SECRET. URLs are bearer credentials: strip query strings for /api/files/signed/
+#   # from proxy and CDN access logs.
 #   downloadUrlExpiry: 300
 #   imageGeneration: # Image Gen settings, either percentage or px
 #     percentage: 100

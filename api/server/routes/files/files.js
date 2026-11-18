@@ -577,15 +577,9 @@ const DOWNLOAD_METADATA_FIELDS = [
   'updatedAt',
 ];
 
-/** Download URLs go to consumers outside the client, and a legacy remote `filepath` can itself be a presigned URL. */
-const STORAGE_LOCATION_FIELDS = new Set(['filepath', 'storageKey', 'storageRegion']);
-const DOWNLOAD_URL_METADATA_FIELDS = DOWNLOAD_METADATA_FIELDS.filter(
-  (field) => !STORAGE_LOCATION_FIELDS.has(field),
-);
-
-const getDownloadFileMetadata = (file, fields = DOWNLOAD_METADATA_FIELDS) => {
+const getDownloadFileMetadata = (file) => {
   const rawFile = typeof file.toObject === 'function' ? file.toObject() : file;
-  return fields.reduce((metadata, field) => {
+  return DOWNLOAD_METADATA_FIELDS.reduce((metadata, field) => {
     if (rawFile[field] !== undefined) {
       metadata[field] = rawFile[field];
     }
@@ -619,10 +613,9 @@ router.get('/download-url/:userId/:file_id', fileAccess, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
       url: result.value.url,
-      expiresAt: result.value.expiresAt.toISOString(),
       filename,
       type: file.type || 'application/octet-stream',
-      metadata: getDownloadFileMetadata(file, DOWNLOAD_URL_METADATA_FIELDS),
+      metadata: getDownloadFileMetadata(file),
     });
   } catch (error) {
     logger.error(

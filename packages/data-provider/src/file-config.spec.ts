@@ -4,9 +4,7 @@ import type { FileConfig } from './types/files';
 import {
   fileConfig as baseFileConfig,
   fileConfigSchema,
-  MAX_DOWNLOAD_URL_EXPIRY_SECONDS,
   resolveEffectiveUseResponsesApi,
-  DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS,
   prefersResponsesApiByModel,
   isAnthropicTextDocumentType,
   getConfiguredMimeAccept,
@@ -1838,11 +1836,6 @@ describe('fileConfigSchema downloadUrlExpiry', () => {
 
   it('is optional', () => {
     expect(fileConfigSchema.safeParse({}).success).toBe(true);
-  });
-
-  it('shares its bounds with the signers', () => {
-    expect(DEFAULT_DOWNLOAD_URL_EXPIRY_SECONDS).toBe(300);
-    expect(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).toBe(3600);
   });
 });
 

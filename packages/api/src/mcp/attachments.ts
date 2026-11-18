@@ -25,8 +25,6 @@ const LEADING_REF = new RegExp(`^${REF_SCHEME}[0-9a-f]{${REF_ID_LENGTH}}(?=$|[:\
 const DEFAULT_MIN_TTL_SECONDS = 60;
 const MAX_FILENAME_LENGTH = 200;
 const MAX_ECHOED_REF_LENGTH = 120;
-/** Deep enough for any tool schema; deeper values pass through untouched. */
-const MAX_VALUE_DEPTH = 32;
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
 export type MCPAttachmentErrorCode =
@@ -101,8 +99,6 @@ function referenceFor(file: AttachmentFile, userId: string): string {
   return `${REF_SCHEME}${digest.slice(0, REF_ID_LENGTH)}`;
 }
 
-const isSameId = (a: unknown, b: unknown): boolean => a != null && b != null && `${a}` === `${b}`;
-
 function matchesMimeType(type: string, accepted: string[] | undefined): boolean {
   if (!accepted) {
     return true;
@@ -124,11 +120,8 @@ function displayName(filename: string | undefined): string {
 
 /** Most recent first; a record without a usable date sorts last. */
 function byRecency(a: AttachmentFile, b: AttachmentFile): number {
-  const time = (file: AttachmentFile): number => {
-    const value = file.createdAt == null ? NaN : new Date(file.createdAt).getTime();
-    return Number.isFinite(value) ? value : -Infinity;
-  };
-  return time(b) - time(a) || 0;
+  const time = (file: AttachmentFile): number => new Date(file.createdAt ?? 0).getTime() || 0;
+  return time(b) - time(a);
 }
 
 /**
@@ -270,26 +263,21 @@ export function createMCPAttachmentRefs(
   const isEligible = (file: AttachmentFile | null | undefined): file is AttachmentFile =>
     !!file?.file_id &&
     !seen.has(file.file_id) &&
-    isSameId(file.user, params.owner.userId) &&
+    file.user != null &&
+    String(file.user) === params.owner.userId &&
     (file.tenantId ?? null) === (params.owner.tenantId ?? null) &&
     !!file.source &&
     supportsDownloadURL(file.source, params.getStrategyFunctions);
 
-  const add = (file: AttachmentFile, earlier: boolean): boolean => {
+  const add = (file: AttachmentFile, earlier: boolean): void => {
     seen.add(file.file_id);
-    const ref = referenceFor(file, params.owner.userId);
-    /** A digest collision would hand one reference to two files; the later one is left out. */
-    if (entries.some((entry) => entry.ref === ref)) {
-      return false;
-    }
     entries.push({
-      ref,
+      ref: referenceFor(file, params.owner.userId),
       file,
       filename: displayName(file.filename),
       type: (file.type || 'application/octet-stream').toLowerCase(),
       earlier,
     });
-    return true;
   };
 
   for (const file of params.files) {
@@ -301,13 +289,13 @@ export function createMCPAttachmentRefs(
   const earlierFiles = [...(params.conversationFiles ?? [])]
     .filter((file): file is AttachmentFile => file != null)
     .sort(byRecency);
-  let earlierCount = 0;
+  const earlierLimit = entries.length + MAX_MCP_ATTACHMENT_CONVERSATION_FILES;
   for (const file of earlierFiles) {
-    if (earlierCount >= MAX_MCP_ATTACHMENT_CONVERSATION_FILES) {
+    if (entries.length >= earlierLimit) {
       break;
     }
-    if (isEligible(file) && add(file, true)) {
-      earlierCount += 1;
+    if (isEligible(file)) {
+      add(file, true);
     }
   }
 
@@ -316,16 +304,19 @@ export function createMCPAttachmentRefs(
 
 type Mapper = (value: string) => string;
 
-/** Copies plain JSON containers, mapping strings; anything else is returned as is. */
-function mapStrings(value: unknown, map: Mapper, depth = 0): unknown {
+/**
+ * Copies plain JSON containers at any depth, mapping strings; anything else is returned as is.
+ * Arguments and results are parsed JSON, so they hold no cycles, and a scrub must not skip a level.
+ */
+function mapStrings(value: unknown, map: Mapper): unknown {
   if (typeof value === 'string') {
     return map(value);
   }
-  if (depth >= MAX_VALUE_DEPTH || value == null || typeof value !== 'object') {
+  if (value == null || typeof value !== 'object') {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => mapStrings(item, map, depth + 1));
+    return value.map((item) => mapStrings(item, map));
   }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
@@ -333,7 +324,7 @@ function mapStrings(value: unknown, map: Mapper, depth = 0): unknown {
   }
   const copy: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
-    copy[key] = mapStrings(item, map, depth + 1);
+    copy[key] = mapStrings(item, map);
   }
   return copy;
 }
@@ -344,21 +335,6 @@ function mapStrings(value: unknown, map: Mapper, depth = 0): unknown {
  */
 function normalizeRef(value: string): string {
   return LEADING_REF.exec(value)?.[0] ?? value;
-}
-
-function collectRefs(value: unknown, refs: Set<string>, depth = 0): void {
-  if (typeof value === 'string') {
-    if (value.startsWith(REF_SCHEME)) {
-      refs.add(value);
-    }
-    return;
-  }
-  if (depth >= MAX_VALUE_DEPTH || value == null || typeof value !== 'object') {
-    return;
-  }
-  for (const item of Array.isArray(value) ? value : Object.values(value)) {
-    collectRefs(item, refs, depth + 1);
-  }
 }
 
 /** Every spelling of a minted URL a server might echo: as is, JSON-escaped, or its query alone. */
@@ -397,24 +373,30 @@ export async function callWithMCPAttachments<T>({
     return call(toolArguments);
   }
   const requested = new Set<string>();
-  collectRefs(toolArguments, requested);
+  mapStrings(toolArguments, (value) => {
+    if (value.startsWith(REF_SCHEME)) {
+      requested.add(value);
+    }
+    return value;
+  });
   if (requested.size === 0) {
     return call(toolArguments);
   }
-  const turnRefs = refs instanceof MCPAttachmentRefs ? refs : undefined;
-  /** Keyed by the string the model sent; one URL is minted per reference it names. */
-  const minted = new Map<string, string>();
+  if (!(refs instanceof MCPAttachmentRefs)) {
+    throw new MCPAttachmentError('unknown_reference', [...requested][0]);
+  }
+  const turnRefs = refs;
+  /** One URL per reference, however many spellings of it the model sent; keyed by the string sent. */
   const urls = new Map<string, Promise<string>>();
-  await Promise.all(
-    [...requested].map(async (sent) => {
-      if (!turnRefs) {
-        throw new MCPAttachmentError('unknown_reference', sent);
-      }
-      const ref = normalizeRef(sent);
-      const url = urls.get(ref) ?? turnRefs.mint(ref, config);
-      urls.set(ref, url);
-      minted.set(sent, await url);
-    }),
+  const minted = new Map(
+    await Promise.all(
+      [...requested].map(async (sent) => {
+        const ref = normalizeRef(sent);
+        const url = urls.get(ref) ?? turnRefs.mint(ref, config);
+        urls.set(ref, url);
+        return [sent, await url] as const;
+      }),
+    ),
   );
   const replacements = [...minted].flatMap(([sent, url]) =>
     urlSpellings(url).map((spelling) => [spelling, normalizeRef(sent)] as const),

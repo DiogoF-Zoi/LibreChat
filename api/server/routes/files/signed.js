@@ -1,6 +1,5 @@
 const express = require('express');
 const { createSignedDownloadHandler } = require('@librechat/api');
-const { getContentDisposition } = require('~/server/utils/files');
 const { getAppConfig } = require('~/server/services/Config/app');
 const { getFiles } = require('~/models');
 
@@ -12,7 +11,6 @@ router.get(
     getSecret: () => process.env.JWT_SECRET,
     getFiles,
     getAppConfig,
-    getContentDisposition,
   }),
 );
 

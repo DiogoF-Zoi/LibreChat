@@ -93,23 +93,6 @@ export async function getMCPInstructionsForServers(
   }
 }
 
-/** Lists the turn's attachment references for the agent's servers that accept them. */
-async function getAttachmentContext(
-  mcpServers: string[],
-  attachmentRefs: MCPAttachmentRefs | undefined,
-  logger?: Logger,
-): Promise<string> {
-  if (!attachmentRefs) {
-    return '';
-  }
-  try {
-    return await attachmentRefs.formatContext(mcpServers);
-  } catch {
-    logger?.error('[AgentContext] Failed to list attachment references');
-    return '';
-  }
-}
-
 /**
  * Builds stable instructions for an agent by combining agent-specific context and MCP context.
  * Order: baseInstructions -> mcpInstructions
@@ -190,7 +173,11 @@ export async function applyContextToAgent({
     const mcpServers = ephemeralAgent?.mcp?.length ? ephemeralAgent.mcp : extractMCPServers(agent);
     const [mcpInstructions, attachmentContext] = await Promise.all([
       getMCPInstructionsForServers(mcpServers, mcpManager, logger, configServers, user),
-      getAttachmentContext(mcpServers, attachmentRefs, logger),
+      /** A failed listing drops only the attachment list, never the MCP instructions. */
+      attachmentRefs?.formatContext(mcpServers).catch(() => {
+        logger?.error('[AgentContext] Failed to list attachment references');
+        return '';
+      }),
     ]);
 
     agent.instructions = buildAgentInstructions({

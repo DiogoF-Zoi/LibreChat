@@ -124,40 +124,24 @@ function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLRe
 
   const urlString = url.toString();
   const parsedUrl = url instanceof URL ? url : new URL(urlString);
-  if (parsedUrl.search) {
-    const policy = JSON.stringify({
-      Statement: [
-        {
-          Resource: `${parsedUrl.origin}${parsedUrl.pathname}?*`,
-          Condition: {
-            DateLessThan: {
-              'AWS:EpochTime': expiresAtEpoch,
-            },
-          },
-        },
-      ],
-    });
-
-    return {
-      url: getSignedUrl({
-        url: urlString,
-        keyPairId: config.keyPairId,
-        privateKey: config.privateKey,
-        policy,
-      }),
-      expiresAt,
-    };
+  const signing = { url: urlString, keyPairId: config.keyPairId, privateKey: config.privateKey };
+  if (!parsedUrl.search) {
+    return { url: getSignedUrl({ ...signing, dateLessThan: expiresAt.toISOString() }), expiresAt };
   }
 
-  return {
-    url: getSignedUrl({
-      url: urlString,
-      keyPairId: config.keyPairId,
-      privateKey: config.privateKey,
-      dateLessThan: expiresAt.toISOString(),
-    }),
-    expiresAt,
-  };
+  const policy = JSON.stringify({
+    Statement: [
+      {
+        Resource: `${parsedUrl.origin}${parsedUrl.pathname}?*`,
+        Condition: {
+          DateLessThan: {
+            'AWS:EpochTime': expiresAtEpoch,
+          },
+        },
+      },
+    ],
+  });
+  return { url: getSignedUrl({ ...signing, policy }), expiresAt };
 }
 
 function appendDownloadOverrides(
