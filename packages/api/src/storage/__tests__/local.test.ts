@@ -7,7 +7,125 @@ import {
   saveLocalBuffer,
   resolveLocalFile,
   writeFileAtomic,
+  resolveLocalDownloadPath,
 } from '../local';
+
+describe('resolveLocalDownloadPath', () => {
+  let base: string;
+  let roots: { uploads: string; imageOutput: string };
+  let outside: string;
+
+  beforeEach(async () => {
+    base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'local-download-')));
+    roots = { uploads: path.join(base, 'uploads'), imageOutput: path.join(base, 'images') };
+    outside = path.join(base, 'outside');
+    await Promise.all(
+      [roots.uploads, roots.imageOutput, outside].map((dir) =>
+        fs.mkdir(path.join(dir, 'user-1'), { recursive: true }),
+      ),
+    );
+    await fs.writeFile(path.join(roots.uploads, 'user-1', 'report.xlsx'), 'upload');
+    await fs.writeFile(path.join(roots.imageOutput, 'user-1', 'chart.png'), 'image');
+    await fs.writeFile(path.join(outside, 'user-1', 'secret.txt'), 'secret');
+  });
+
+  afterEach(async () => {
+    await fs.rm(base, { recursive: true, force: true });
+  });
+
+  it('resolves an upload to its real path', async () => {
+    expect(await resolveLocalDownloadPath('/uploads/user-1/report.xlsx', roots)).toEqual({
+      ok: true,
+      value: path.join(roots.uploads, 'user-1', 'report.xlsx'),
+    });
+  });
+
+  it('resolves a record whose name was percent-encoded when it was stored', async () => {
+    await fs.writeFile(path.join(roots.uploads, 'user-1', 'Q3 #1 50%.xlsx'), 'encoded');
+
+    const result = await resolveLocalDownloadPath(
+      `/uploads/user-1/${encodeURIComponent('Q3 #1 50%.xlsx')}`,
+      roots,
+    );
+
+    expect(result.ok && result.value).toBe(path.join(roots.uploads, 'user-1', 'Q3 #1 50%.xlsx'));
+  });
+
+  it('resolves an image under the image root, ignoring a cache-busting suffix', async () => {
+    const result = await resolveLocalDownloadPath('/images/user-1/chart.png?v=123', roots);
+    expect(result.ok && result.value).toBe(path.join(roots.imageOutput, 'user-1', 'chart.png'));
+  });
+
+  it.each([
+    ['an unknown root', '/outside/user-1/secret.txt'],
+    ['an absolute path', path.resolve('/srv/outside/secret.txt')],
+    ['a prefix that is not at the start', '/x/uploads/user-1/report.xlsx'],
+    ['a relative traversal', '/uploads/../outside/user-1/secret.txt'],
+    ['a nested traversal', '/uploads/user-1/../../outside/user-1/secret.txt'],
+    ['an encoded-looking traversal kept literal', '/uploads/..%2Foutside/secret.txt'],
+    ['a null byte', '/uploads/user-1/report.xlsx\0.png'],
+    ['the root itself', '/uploads/'],
+  ])('refuses %s', async (_label, filepath) => {
+    expect((await resolveLocalDownloadPath(filepath, roots)).ok).toBe(false);
+  });
+
+  it.each([
+    ['/uploads/../outside/user-1/secret.txt'],
+    ['/uploads/user-1/../../outside/user-1/secret.txt'],
+    ['/uploads/user-1/report.xlsx\0.png'],
+  ])('reports %s as outside storage', async (filepath) => {
+    expect(await resolveLocalDownloadPath(filepath, roots)).toEqual({
+      ok: false,
+      error: { code: 'outside_storage' },
+    });
+  });
+
+  it('refuses a symlink inside a root that points outside it', async () => {
+    await fs.symlink(
+      path.join(outside, 'user-1'),
+      path.join(roots.uploads, 'user-1', 'escape'),
+      'junction',
+    );
+
+    expect(await resolveLocalDownloadPath('/uploads/user-1/escape/secret.txt', roots)).toEqual({
+      ok: false,
+      error: { code: 'outside_storage' },
+    });
+  });
+
+  it('follows a symlink that stays inside its root', async () => {
+    await fs.mkdir(path.join(roots.uploads, 'shared'));
+    await fs.writeFile(path.join(roots.uploads, 'shared', 'data.csv'), 'a,b');
+    await fs.symlink(
+      path.join(roots.uploads, 'shared'),
+      path.join(roots.uploads, 'user-1', 'link'),
+      'junction',
+    );
+
+    const result = await resolveLocalDownloadPath('/uploads/user-1/link/data.csv', roots);
+    expect(result.ok && result.value).toBe(path.join(roots.uploads, 'shared', 'data.csv'));
+  });
+
+  it.each([
+    ['a missing file', '/uploads/user-1/gone.xlsx'],
+    ['a missing directory', '/uploads/user-9/gone.xlsx'],
+    ['a directory', '/uploads/user-1'],
+    ['a path through a file', '/uploads/user-1/report.xlsx/inner'],
+  ])('reports %s as not found', async (_label, filepath) => {
+    expect(await resolveLocalDownloadPath(filepath, roots)).toEqual({
+      ok: false,
+      error: { code: 'not_found' },
+    });
+  });
+
+  it('reports a missing storage root as not found', async () => {
+    await fs.rm(roots.uploads, { recursive: true });
+    expect(await resolveLocalDownloadPath('/uploads/user-1/report.xlsx', roots)).toEqual({
+      ok: false,
+      error: { code: 'not_found' },
+    });
+  });
+});
 
 describe('local storage writes', () => {
   let dir: string;

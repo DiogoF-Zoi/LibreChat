@@ -10,6 +10,7 @@ import type {
   SaveURLParams,
   UploadFileParams,
   DownloadURLParams,
+  DownloadURLResult,
   SaveURLResult,
   UploadResult,
 } from '~/storage/types';
@@ -33,7 +34,7 @@ import {
   createRemoteFileByteLimitTransform,
 } from '~/storage/url';
 import { AVATAR_BASE_PATH, DEFAULT_BASE_PATH as defaultBasePath } from '~/storage/constants';
-import { sanitizeContentDispositionFilename } from '~/storage/validation';
+import { formatContentDisposition } from '~/storage/disposition';
 import { getCloudFrontConfig } from '~/cdn/cloudfront';
 import { s3Config } from '~/storage/s3/s3Config';
 
@@ -108,45 +109,39 @@ function buildCloudFrontUrl(s3Key: string): string {
 }
 
 function signUrl(url: string | URL): string {
+  return signUrlWithExpiry(url).url;
+}
+
+function signUrlWithExpiry(url: string | URL, expiresIn?: number): DownloadURLResult {
   const config = getCloudFrontConfig();
   if (!config?.privateKey || !config?.keyPairId) {
     throw new Error('[signUrl] Signing keys not configured.');
   }
 
-  const expiry = config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
-  const expiresAtMs = Date.now() + expiry * 1000;
-  const expiresAtEpoch = Math.floor(expiresAtMs / 1000);
+  const expiry = expiresIn ?? config.urlExpiry ?? s3Config.S3_URL_EXPIRY_SECONDS;
+  const expiresAtEpoch = Math.floor(Date.now() / 1000) + expiry;
+  const expiresAt = new Date(expiresAtEpoch * 1000);
 
   const urlString = url.toString();
   const parsedUrl = url instanceof URL ? url : new URL(urlString);
-  if (parsedUrl.search) {
-    const policy = JSON.stringify({
-      Statement: [
-        {
-          Resource: `${parsedUrl.origin}${parsedUrl.pathname}?*`,
-          Condition: {
-            DateLessThan: {
-              'AWS:EpochTime': expiresAtEpoch,
-            },
-          },
-        },
-      ],
-    });
-
-    return getSignedUrl({
-      url: urlString,
-      keyPairId: config.keyPairId,
-      privateKey: config.privateKey,
-      policy,
-    });
+  const signing = { url: urlString, keyPairId: config.keyPairId, privateKey: config.privateKey };
+  if (!parsedUrl.search) {
+    return { url: getSignedUrl({ ...signing, dateLessThan: expiresAt.toISOString() }), expiresAt };
   }
 
-  return getSignedUrl({
-    url: urlString,
-    keyPairId: config.keyPairId,
-    privateKey: config.privateKey,
-    dateLessThan: new Date(expiresAtMs).toISOString(),
+  const policy = JSON.stringify({
+    Statement: [
+      {
+        Resource: `${parsedUrl.origin}${parsedUrl.pathname}?*`,
+        Condition: {
+          DateLessThan: {
+            'AWS:EpochTime': expiresAtEpoch,
+          },
+        },
+      },
+    ],
   });
+  return { url: getSignedUrl({ ...signing, policy }), expiresAt };
 }
 
 function appendDownloadOverrides(
@@ -156,13 +151,10 @@ function appendDownloadOverrides(
 ): URL {
   const downloadUrl = new URL(url);
 
-  if (customFilename) {
-    const safeFilename = sanitizeContentDispositionFilename(customFilename);
-    downloadUrl.searchParams.set(
-      'response-content-disposition',
-      `attachment; filename="${safeFilename}"`,
-    );
-  }
+  downloadUrl.searchParams.set(
+    'response-content-disposition',
+    formatContentDisposition(customFilename),
+  );
   if (contentType) {
     downloadUrl.searchParams.set('response-content-type', contentType);
   }
@@ -348,11 +340,12 @@ export async function getCloudFrontDownloadURL({
   file,
   customFilename = null,
   contentType = null,
-}: DownloadURLParams): Promise<string> {
+  expiresIn,
+}: DownloadURLParams): Promise<DownloadURLResult> {
   const key = resolveStoredS3Key(file);
   if (!key) {
     throw new Error('[getCloudFrontDownloadURL] Unable to extract S3 key from file path');
   }
   const url = appendDownloadOverrides(buildCloudFrontUrl(key), customFilename, contentType);
-  return signUrl(url);
+  return signUrlWithExpiry(url, expiresIn);
 }

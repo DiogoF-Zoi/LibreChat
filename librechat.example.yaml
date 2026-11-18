@@ -772,6 +772,17 @@ actions:
 #       # Persisted agent that owns the executing tool, including a subagent's own tools.
 #       # Empty for plain chat or an ephemeral agent. Available on operator-defined servers.
 #       X-Agent-Id: "{{LIBRECHAT_AGENT_ID}}"
+#   documents:
+#     type: streamable-http
+#     url: https://documents-mcp.example.com/mcp
+#     # Admin-only: the model sees `attachment://…` references, swapped for short-lived signed
+#     # download URLs only in the outbound tool call. Needs local (server reachable at DOMAIN_SERVER),
+#     # S3 or CloudFront storage.
+#     attachmentUrls:
+#       mimeTypes: [application/pdf, text/*] # exact or `type/*`; omit to offer every signable file
+#       expiry: 300 # seconds; defaults to fileConfig.downloadUrlExpiry, capped at 3600
+#       minTtl: 60 # seconds a URL must have left when handed to the server
+#       conversationFiles: 20 # earlier messages' files also offered (needs `resendFiles`); 0-100
 #   puppeteer:
 #     type: stdio
 #     command: npx
@@ -1558,6 +1569,11 @@ endpoints:
 #       fileSizeLimit: 5
 #   serverFileSizeLimit: 100  # Global server file size limit in MB
 #   avatarSizeLimit: 2  # Limit for user avatar image size in MB
+#   # Lifetime in seconds (max 3600) of signed download URLs. Unset, S3 and CloudFront keep their own
+#   # expiry settings; local storage and MCP `attachmentUrls` use 300. Local URLs are signed with a key
+#   # derived from JWT_SECRET. URLs are bearer credentials: strip query strings for /api/files/signed/
+#   # from proxy and CDN access logs.
+#   downloadUrlExpiry: 300
 #   imageGeneration: # Image Gen settings, either percentage or px
 #     percentage: 100
 #     px: 1024

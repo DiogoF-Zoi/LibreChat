@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_DOWNLOAD_URL_EXPIRY_SECONDS } from './file-config';
 import { TokenExchangeMethodEnum } from './types/agents';
 import { extractEnvVariable } from './utils';
 
@@ -235,6 +236,48 @@ const DeclaredToolPropertySchema = z
   })
   .strict();
 
+/** `type/subtype` or `type/*`, lowercase. */
+const ATTACHMENT_MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/(?:\*|[a-z0-9][a-z0-9!#$&^_.+-]*)$/;
+
+/** Default for `attachmentUrls.conversationFiles`. */
+export const DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES = 20;
+/** Ceiling for `attachmentUrls.conversationFiles`; each listed file costs a line of context. */
+export const MAX_MCP_ATTACHMENT_CONVERSATION_FILES = 100;
+
+/**
+ * Hands the conversation's attachments to a server's tools as short-lived signed download URLs.
+ * The model only sees opaque `attachment://` references; each is exchanged for a freshly signed
+ * URL in the outbound tool call, so the URL never reaches the model, traces or stored messages.
+ */
+export const MCPAttachmentURLsSchema = z
+  .object({
+    /** MIME types the server accepts, exact or `type/*`. Default: any file the storage can sign. */
+    mimeTypes: z.array(z.string().toLowerCase().regex(ATTACHMENT_MIME_PATTERN)).min(1).optional(),
+    /** URL lifetime in seconds. Default: `fileConfig.downloadUrlExpiry`, else 300. */
+    expiry: z.number().int().positive().max(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).optional(),
+    /** Lifetime a URL must have left when handed to the server, in seconds. Default: 60. */
+    minTtl: z.number().int().nonnegative().max(MAX_DOWNLOAD_URL_EXPIRY_SECONDS).optional(),
+    /**
+     * Files from earlier messages of the conversation the server is also offered, most recent
+     * first, on top of the latest message's attachments. A server cannot be assumed to keep a file
+     * between calls, so this lets a tool be handed one again. `0` offers the latest message only.
+     * Default: 20.
+     */
+    conversationFiles: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(MAX_MCP_ATTACHMENT_CONVERSATION_FILES)
+      .optional(),
+  })
+  .strict()
+  .refine((value) => value.expiry == null || value.minTtl == null || value.minTtl <= value.expiry, {
+    message: 'minTtl must not exceed expiry',
+    path: ['minTtl'],
+  });
+
+export type MCPAttachmentURLs = z.infer<typeof MCPAttachmentURLsSchema>;
+
 const BaseOptionsSchema = z.object({
   /** Display name for the MCP server */
   title: z.string().regex(MCP_SERVER_TITLE_PATTERN, MCP_SERVER_TITLE_ERROR).optional(),
@@ -288,6 +331,8 @@ const BaseOptionsSchema = z.object({
    * - string: Use custom instructions (overrides server-provided)
    */
   serverInstructions: z.union([z.boolean(), z.string()]).optional(),
+  /** Admin-only: a server that receives signed URLs reads users' files, so users cannot enable it. */
+  attachmentUrls: MCPAttachmentURLsSchema.optional(),
   /**
    * Whether this server requires OAuth authentication
    * If not specified, will be auto-detected during construction
@@ -583,6 +628,7 @@ const omitServerManagedFields = <T extends z.ZodObject<z.ZodRawShape>>(schema: T
     oauthPersistenceWaitTimeout: true,
     chatMenu: true,
     serverInstructions: true,
+    attachmentUrls: true,
     requiresOAuth: true,
     oauthPrompt: true,
     oauthToolCatalog: true,

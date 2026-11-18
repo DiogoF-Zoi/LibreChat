@@ -82,3 +82,10 @@ export function toLocalUrlPath(...parts: string[]): string {
 export function fromLocalUrlPath(urlPath: string): string {
   return urlPath.split('/').map(decodeSegment).join('/');
 }
+
+const FILE_ID_PREFIX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__/i;
+
+/** Removes the `<file_id>__` prefix uploads add to stored names, leaving the name the user chose. */
+export function stripFileIdPrefix(filename: string): string {
+  return filename.replace(FILE_ID_PREFIX, '');
+}

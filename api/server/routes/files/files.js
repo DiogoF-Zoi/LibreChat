@@ -24,6 +24,8 @@ const {
   resolveAssistantToolPermissions,
   resolveDownloadPath,
   pipeToResponse,
+  isDirectDownloadSource,
+  resolveFileDownloadURL,
 } = require('@librechat/api');
 const {
   isUUID,
@@ -535,23 +537,14 @@ router.get('/:file_id/preview', fileAccess, async (req, res) => {
 /**
  * Returns a strategy-managed signed URL for an already-authorized file record.
  */
-const getDirectDownloadURL = async ({
-  req,
-  file,
-  customFilename = cleanFileName(file.filename),
-}) => {
-  const { getDownloadURL } = getStrategyFunctions(file.source);
-  if (!getDownloadURL) {
-    return null;
-  }
-
-  return getDownloadURL({
+const getDirectDownloadURL = ({ req, file, filename = cleanFileName(file.filename) }) =>
+  resolveFileDownloadURL({
     req,
     file,
-    customFilename,
-    contentType: file.type || 'application/octet-stream',
+    filename,
+    expiresIn: req.config?.fileConfig?.downloadUrlExpiry,
+    getStrategyFunctions,
   });
-};
 
 // Security allowlist: excludes internal ids, owner/tenant identifiers, and extracted text.
 // `filepath` stays included because cached TFile records need it for previews/deletes.
@@ -600,19 +593,17 @@ router.get('/download-url/:userId/:file_id', fileAccess, async (req, res) => {
     logger.debug(`File download URL requested by user ${userId}: ${file_id}`);
 
     const file = req.fileAccess.file;
-    if (checkOpenAIStorage(file.source) && !file.model) {
+    const filename = cleanFileName(file.filename);
+    const result = await getDirectDownloadURL({ req, file, filename });
+
+    if (!result.ok && result.error.code === 'missing_model') {
       logger.warn(
         `File download URL requested by user ${userId} has no associated model: ${file_id}`,
       );
       return res.status(400).send('The model used when creating this file is not available');
     }
 
-    const filename = cleanFileName(file.filename);
-    const downloadURL = checkOpenAIStorage(file.source)
-      ? null
-      : await getDirectDownloadURL({ req, file, customFilename: filename });
-
-    if (!downloadURL) {
+    if (!result.ok) {
       logger.debug(
         `File download URL requested by user ${userId} is not supported for source: ${file.source}`,
       );
@@ -621,13 +612,16 @@ router.get('/download-url/:userId/:file_id', fileAccess, async (req, res) => {
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
-      url: downloadURL,
+      url: result.value.url,
       filename,
       type: file.type || 'application/octet-stream',
       metadata: getDownloadFileMetadata(file),
     });
   } catch (error) {
-    logger.error('[DOWNLOAD URL ROUTE] Error generating file download URL:', error);
+    logger.error(
+      '[DOWNLOAD URL ROUTE] Error generating file download URL:',
+      getSafeErrorMetadata(error),
+    );
     res.status(500).send('Error generating file download URL');
   }
 });
@@ -706,17 +700,17 @@ router.get('/download/:userId/:file_id', fileAccess, async (req, res) => {
 
       stream.pipe(res);
     } else {
-      if (getDownloadURL && req.query.direct === 'true') {
+      if (getDownloadURL && req.query.direct === 'true' && isDirectDownloadSource(file.source)) {
         try {
-          const downloadURL = await getDirectDownloadURL({ req, file });
-          if (downloadURL) {
+          const result = await getDirectDownloadURL({ req, file });
+          if (result.ok) {
             res.setHeader('Cache-Control', 'no-store');
-            return res.redirect(302, downloadURL);
+            return res.redirect(302, result.value.url);
           }
         } catch (error) {
           logger.warn(
             '[DOWNLOAD ROUTE] Falling back to stream after URL generation failed:',
-            error,
+            getSafeErrorMetadata(error),
           );
         }
       }

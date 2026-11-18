@@ -1,7 +1,7 @@
 import path from 'path';
 import crypto from 'node:crypto';
 import { EModelEndpoint } from 'librechat-data-provider';
-import { mkdir, access, copyFile, rename, unlink, writeFile } from 'fs/promises';
+import { stat, mkdir, access, rename, unlink, realpath, copyFile, writeFile } from 'fs/promises';
 import type { TFileConfig } from 'librechat-data-provider';
 import type { AppConfig } from '@librechat/data-schemas';
 import { stripCacheBust, toLocalUrlPath, fromLocalUrlPath } from './path';
@@ -129,6 +129,76 @@ export async function resolveLocalFile(root: string, urlPath: string): Promise<s
     return decoded;
   }
   return recorded;
+}
+
+export interface LocalDownloadRoots {
+  uploads: string;
+  imageOutput: string;
+}
+
+export type LocalDownloadPathErrorCode = 'not_found' | 'outside_storage';
+
+/** `value` is the file's real path. */
+export type LocalDownloadPathResult =
+  | { ok: true; value: string }
+  | { ok: false; error: { code: LocalDownloadPathErrorCode } };
+
+/** URL prefixes local storage writes into `filepath` (`saveLocalBuffer`, `uploadLocalFile`). */
+const LOCAL_DOWNLOAD_PREFIXES: [string, keyof LocalDownloadRoots][] = [
+  ['/uploads/', 'uploads'],
+  ['/images/', 'imageOutput'],
+];
+
+const outsideStorage: LocalDownloadPathResult = {
+  ok: false,
+  error: { code: 'outside_storage' },
+};
+const notFound: LocalDownloadPathResult = { ok: false, error: { code: 'not_found' } };
+
+const isMissing = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+};
+
+/**
+ * Resolves a record's `filepath` to a real file under the uploads or image roots. Containment is
+ * checked before and after symlinks resolve, so a link inside a root cannot escape it.
+ */
+export async function resolveLocalDownloadPath(
+  filepath: string,
+  roots: LocalDownloadRoots,
+): Promise<LocalDownloadPathResult> {
+  const cleanFilepath = stripCacheBust(filepath);
+  const match = LOCAL_DOWNLOAD_PREFIXES.find(([prefix]) => cleanFilepath.startsWith(prefix));
+  if (!match) {
+    return outsideStorage;
+  }
+  const [prefix, rootKey] = match;
+  const root = roots[rootKey];
+  const relative = cleanFilepath.slice(prefix.length);
+  if (!root || !relative || relative.includes('\0')) {
+    return outsideStorage;
+  }
+
+  /** Names holding `#`, `%` and the like are recorded percent-encoded, so the record is decoded. */
+  const lexicalPath = await resolveLocalFile(root, relative);
+  if (!isStrictlyWithin(root, lexicalPath)) {
+    return outsideStorage;
+  }
+
+  try {
+    const [realRoot, realPath] = await Promise.all([realpath(root), realpath(lexicalPath)]);
+    if (!isStrictlyWithin(realRoot, realPath)) {
+      return outsideStorage;
+    }
+    const stats = await stat(realPath);
+    return stats.isFile() ? { ok: true, value: realPath } : notFound;
+  } catch (error) {
+    if (isMissing(error)) {
+      return notFound;
+    }
+    throw error;
+  }
 }
 
 /**

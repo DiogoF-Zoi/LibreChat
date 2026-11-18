@@ -6487,6 +6487,38 @@ describe('AgentClient - titleConvo', () => {
       ).resolves.toEqual(expect.objectContaining({ prompt: expect.any(Array) }));
     });
 
+    it('offers MCP servers the owner-resolved files of earlier messages', async () => {
+      const sheet = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const ownFile = { ...makeUploadedFile('own-sheet', 'Q3.xlsx', sheet), _id: 'a'.repeat(24) };
+      const otherUsersFile = {
+        ...makeUploadedFile('other-sheet', 'Theirs.xlsx', sheet),
+        _id: 'b'.repeat(24),
+        user: 'user-456',
+      };
+      client.authorizedHistoricalFiles = new Map([
+        ['own-sheet', ownFile],
+        ['other-sheet', otherUsersFile],
+      ]);
+
+      await client.buildMessages(
+        [
+          {
+            messageId: 'msg-1',
+            parentMessageId: null,
+            sender: 'User',
+            text: 'Earlier upload.',
+            isCreatedByUser: true,
+            files: [{ file_id: 'own-sheet' }, { file_id: 'other-sheet' }],
+          },
+        ],
+        'msg-1',
+        {},
+      );
+
+      /** The latest message attached nothing, so the one reference comes from history. */
+      expect(JSON.parse(JSON.stringify(client.mcpAttachmentRefs))).toEqual({ size: 1 });
+    });
+
     it.each([
       ['seeds the run from a server-authored parent response', undefined, true],
       ['ignores context meta on a client-submitted parent response', true, false],
@@ -10578,6 +10610,78 @@ describe('AgentClient - resumeCompletion content protection', () => {
     );
     expect(resume).toHaveBeenCalledTimes(1);
     expect(resume.mock.calls[0][1]).not.toHaveProperty('callbacks');
+  });
+
+  describe('MCP attachment references', () => {
+    const sheet = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const makeSheet = (file_id, filename, createdAt) => ({
+      user: 'user-123',
+      file_id,
+      filename,
+      filepath: `/uploads/${filename}`,
+      object: 'file',
+      type: sheet,
+      bytes: 128,
+      embedded: false,
+      usage: 0,
+      source: 'local',
+      createdAt,
+    });
+
+    /** A paused turn: `latest` is attached to its user message, `earlier` only to the history. */
+    const resumePausedTurn = async (configure) => {
+      const earlier = makeSheet('earlier-sheet', 'Q2.xlsx', '2026-01-01T00:00:00.000Z');
+      const latest = makeSheet('latest-sheet', 'Q3.xlsx', '2026-02-01T00:00:00.000Z');
+      mockGetAgentCheckpointer.mockResolvedValue({
+        getTuple: jest.fn().mockResolvedValue({
+          checkpoint: {
+            channel_values: {
+              messages: [
+                {
+                  _getType: () => 'human',
+                  content: 'Earlier upload.',
+                  files: [{ file_id: 'earlier-sheet' }],
+                },
+              ],
+            },
+          },
+        }),
+      });
+      require('~/models').getFiles.mockResolvedValue([earlier]);
+      const resume = jest.fn().mockResolvedValue(undefined);
+      mockCreateRun.mockResolvedValue({ resume, getCalibrationRatio: jest.fn(() => 0) });
+      const context = makeContext();
+      context.options.attachments = [latest];
+      context.options.req.body.files = [{ file_id: 'latest-sheet' }];
+      configure?.(context);
+
+      await AgentClient.prototype.resumeCompletion.call(context, { resumeValue: {} });
+
+      const { MCP_ATTACHMENT_REFS_KEY } = require('@librechat/api');
+      return resume.mock.calls[0][1].configurable[MCP_ATTACHMENT_REFS_KEY];
+    };
+
+    it('hands the resumed run the references its paused tool calls were made with', async () => {
+      const { MCPAttachmentRefs } = require('@librechat/api');
+
+      const refs = await resumePausedTurn();
+
+      expect(refs).toBeInstanceOf(MCPAttachmentRefs);
+      expect(refs.size).toBe(2);
+      /** The paused message's own file stays "latest", so a server taking no history still gets it. */
+      expect(refs.accepted({ conversationFiles: 0 }).map((entry) => entry.filename)).toEqual([
+        'Q3.xlsx',
+      ]);
+      expect(refs.accepted({}).map((entry) => entry.filename)).toEqual(['Q3.xlsx', 'Q2.xlsx']);
+    });
+
+    it('offers no earlier files to the resumed run when the endpoint does not resend them', async () => {
+      const refs = await resumePausedTurn((context) => {
+        context.options.resendFiles = false;
+      });
+
+      expect(refs.accepted({}).map((entry) => entry.filename)).toEqual(['Q3.xlsx']);
+    });
   });
 
   it('blocks handoff dynamic tool context before rebuilding a resumed run', async () => {

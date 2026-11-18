@@ -1,0 +1,426 @@
+import crypto from 'node:crypto';
+import { logger } from '@librechat/data-schemas';
+import {
+  MAX_MCP_ATTACHMENT_CONVERSATION_FILES,
+  DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES,
+} from 'librechat-data-provider';
+import type { MCPAttachmentURLs, TFile } from 'librechat-data-provider';
+import type { FileDownloadURLOutcome, FileDownloadURLStrategy } from '~/files/download';
+import {
+  supportsDownloadURL,
+  resolveDownloadURLExpiry,
+  resolveFileDownloadURL,
+} from '~/files/download';
+import { isMCPToolResultError, markMCPToolResultError } from './status';
+import { getSafeErrorMetadata } from '~/utils/errors';
+import { stripFileIdPrefix } from '~/storage/path';
+
+/** Run `configurable` key carrying the turn's references from message building to tool calls. */
+export const MCP_ATTACHMENT_REFS_KEY = 'mcpAttachmentRefs';
+
+const REF_SCHEME = 'attachment://';
+const REF_ID_LENGTH = 12;
+/** A reference at the start of a string, followed by nothing or by a list line's `: "name"` tail. */
+const LEADING_REF = new RegExp(`^${REF_SCHEME}[0-9a-f]{${REF_ID_LENGTH}}(?=$|[:\\s])`);
+const DEFAULT_MIN_TTL_SECONDS = 60;
+const MAX_FILENAME_LENGTH = 200;
+const MAX_ECHOED_REF_LENGTH = 120;
+const CONTROL_CHARACTERS = /\p{Cc}/gu;
+
+export type MCPAttachmentErrorCode =
+  | 'unknown_reference'
+  | 'unsupported_type'
+  | 'unsupported_source'
+  | 'url_unavailable'
+  | 'insufficient_ttl';
+
+const ATTACHMENT_ERROR_MESSAGES: Record<MCPAttachmentErrorCode, (ref: string) => string> = {
+  unknown_reference: (ref) =>
+    `Attachment reference "${ref}" is not available in this turn. Use a reference from this turn's Attached Files list; if the file is not listed there, ask the user to attach it again.`,
+  unsupported_type: (ref) => `This tool does not accept the file type of attachment "${ref}".`,
+  unsupported_source: (ref) => `Attachment "${ref}" cannot be shared with tools.`,
+  url_unavailable: (ref) => `A download link for attachment "${ref}" could not be issued.`,
+  insufficient_ttl: (ref) =>
+    `A download link for attachment "${ref}" could not be issued for long enough. Try again.`,
+};
+
+/** Messages are model-safe: they name the reference the model sent, never a URL or record id. */
+export class MCPAttachmentError extends Error {
+  readonly code: MCPAttachmentErrorCode;
+
+  constructor(code: MCPAttachmentErrorCode, ref: string) {
+    const shown =
+      ref.length > MAX_ECHOED_REF_LENGTH ? `${ref.slice(0, MAX_ECHOED_REF_LENGTH)}…` : ref;
+    super(ATTACHMENT_ERROR_MESSAGES[code](shown));
+    this.name = 'MCPAttachmentError';
+    this.code = code;
+  }
+}
+
+type AttachmentFile = TFile & { tenantId?: string | null };
+
+interface AttachmentEntry {
+  ref: string;
+  file: AttachmentFile;
+  filename: string;
+  type: string;
+  /** Attached to an earlier message of the conversation rather than the latest one. */
+  earlier: boolean;
+}
+
+export interface MCPAttachmentRefsParams {
+  /** Hydrated request attachments; each is re-checked against the owner and the request's ids. */
+  files: ReadonlyArray<AttachmentFile | null | undefined>;
+  /** File ids the user attached to this message; anything else is not this turn's attachment. */
+  requestFileIds: Iterable<string>;
+  /**
+   * Records of files referenced by earlier messages of this conversation, already loaded for the
+   * turn under an owner filter (`authorizedHistoricalFiles`). Each is re-checked against the owner.
+   */
+  conversationFiles?: Iterable<AttachmentFile | null | undefined>;
+  owner: { userId: string; tenantId?: string | null };
+  getStrategyFunctions: (source: string) => FileDownloadURLStrategy;
+  /** `fileConfig.downloadUrlExpiry`; a server's own `attachmentUrls.expiry` takes precedence. */
+  defaultExpiry?: number;
+  /** Resolves a server's config for the acting user, used to decide which agents see the list. */
+  getServerConfig: (
+    serverName: string,
+  ) => Promise<{ attachmentUrls?: MCPAttachmentURLs } | null | undefined>;
+  now?: () => number;
+}
+
+/**
+ * A file keeps the same reference in every turn: tool calls are stored with the reference the
+ * model sent, so one copied from an earlier turn has to resolve again. It is a digest, not the
+ * record id, and only resolves for files the turn lists after the owner checks.
+ */
+function referenceFor(file: AttachmentFile, userId: string): string {
+  const digest = crypto.createHash('sha256').update(`${userId}\0${file.file_id}`).digest('hex');
+  return `${REF_SCHEME}${digest.slice(0, REF_ID_LENGTH)}`;
+}
+
+function matchesMimeType(type: string, accepted: string[] | undefined): boolean {
+  if (!accepted) {
+    return true;
+  }
+  const normalized = type.toLowerCase().split(';')[0].trim();
+  const [major] = normalized.split('/');
+  return accepted.some((pattern) =>
+    pattern.endsWith('/*') ? `${major}/*` === pattern : pattern === normalized,
+  );
+}
+
+function displayName(filename: string | undefined): string {
+  const cleaned = stripFileIdPrefix(filename ?? '')
+    .replace(CONTROL_CHARACTERS, ' ')
+    .trim();
+  const name = cleaned || 'attachment';
+  return name.length > MAX_FILENAME_LENGTH ? `${name.slice(0, MAX_FILENAME_LENGTH)}…` : name;
+}
+
+/** Most recent first; a record without a usable date sorts last. */
+function byRecency(a: AttachmentFile, b: AttachmentFile): number {
+  const time = (file: AttachmentFile): number => new Date(file.createdAt ?? 0).getTime() || 0;
+  return time(b) - time(a);
+}
+
+/**
+ * This turn's view of the conversation's attachments, addressed by opaque references that stay the
+ * same for a file across turns: the latest message's files first, then earlier messages' files,
+ * most recent first. It holds file records and mints URLs on demand; it never stores a URL. Fields
+ * are private so neither serialization nor logging of the run config exposes the records.
+ */
+export class MCPAttachmentRefs {
+  readonly #entries: Map<string, AttachmentEntry>;
+  readonly #getStrategyFunctions: MCPAttachmentRefsParams['getStrategyFunctions'];
+  readonly #getServerConfig: MCPAttachmentRefsParams['getServerConfig'];
+  readonly #defaultExpiry: number | undefined;
+  readonly #now: () => number;
+
+  constructor(entries: AttachmentEntry[], params: MCPAttachmentRefsParams) {
+    this.#entries = new Map(entries.map((entry) => [entry.ref, entry]));
+    this.#getStrategyFunctions = params.getStrategyFunctions;
+    this.#getServerConfig = params.getServerConfig;
+    this.#defaultExpiry = params.defaultExpiry;
+    this.#now = params.now ?? Date.now;
+  }
+
+  get size(): number {
+    return this.#entries.size;
+  }
+
+  toJSON(): { size: number } {
+    return { size: this.size };
+  }
+
+  /**
+   * References a server with this config accepts: every latest-message file of a matching type,
+   * then up to `conversationFiles` earlier ones of a matching type.
+   */
+  accepted(config: MCPAttachmentURLs | undefined): AttachmentEntry[] {
+    if (!config) {
+      return [];
+    }
+    const earlierLimit = config.conversationFiles ?? DEFAULT_MCP_ATTACHMENT_CONVERSATION_FILES;
+    let earlierCount = 0;
+    return [...this.#entries.values()].filter((entry) => {
+      if (!matchesMimeType(entry.type, config.mimeTypes)) {
+        return false;
+      }
+      if (!entry.earlier) {
+        return true;
+      }
+      earlierCount += 1;
+      return earlierCount <= earlierLimit;
+    });
+  }
+
+  /**
+   * Lists the references any of `serverNames` accepts, for the agent's system tail, or `''` when
+   * none of its servers takes attachments.
+   */
+  async formatContext(serverNames: string[]): Promise<string> {
+    if (this.size === 0 || serverNames.length === 0) {
+      return '';
+    }
+    const configs = await Promise.all(
+      serverNames.map(async (name) => [name, await this.#getServerConfig(name)] as const),
+    );
+    const accepting = new Map<string, string[]>();
+    for (const [serverName, config] of configs) {
+      for (const entry of this.accepted(config?.attachmentUrls)) {
+        accepting.set(entry.ref, [...(accepting.get(entry.ref) ?? []), serverName]);
+      }
+    }
+    if (accepting.size === 0) {
+      return '';
+    }
+    const lines = [...this.#entries.values()]
+      .filter((entry) => accepting.has(entry.ref))
+      .map(
+        (entry) =>
+          `- ${entry.ref}: ${JSON.stringify(entry.filename)} (${entry.type});${entry.earlier ? ' from an earlier message;' : ''} accepted by: ${accepting.get(entry.ref)?.join(', ')}`,
+      );
+    return [
+      '# Attached Files',
+      "Files the user attached in this conversation, the latest message's first. When a tool from an accepting server needs the URL of one of these files in an argument, pass only the `attachment://…` token, without the file name, type or any punctuation after it, in place of the URL. It is exchanged for a short-lived download link only when the tool runs. A server may not keep a file between calls, so when a tool needs a file again or reports that it is gone, pass its reference again. A file keeps the same reference in every turn, but only the files listed here can be used.",
+      ...lines,
+    ].join('\n');
+  }
+
+  /** Mints a URL for one reference under a server's policy; throws `MCPAttachmentError`. */
+  async mint(ref: string, config: MCPAttachmentURLs): Promise<string> {
+    const entry = this.#entries.get(ref);
+    if (!entry) {
+      throw new MCPAttachmentError('unknown_reference', ref);
+    }
+    if (!matchesMimeType(entry.type, config.mimeTypes)) {
+      throw new MCPAttachmentError('unsupported_type', ref);
+    }
+    /** An earlier file past this server's `conversationFiles` was never offered to it. */
+    if (entry.earlier && !this.accepted(config).includes(entry)) {
+      throw new MCPAttachmentError('unknown_reference', ref);
+    }
+    const expiresIn = resolveDownloadURLExpiry(config.expiry ?? this.#defaultExpiry);
+    let result: FileDownloadURLOutcome;
+    try {
+      result = await resolveFileDownloadURL({
+        file: entry.file,
+        filename: entry.filename,
+        expiresIn,
+        getStrategyFunctions: this.#getStrategyFunctions,
+      });
+    } catch (error) {
+      /** Storage errors can name buckets or credentials, and this error's message reaches the model. */
+      logger.error('[MCPAttachments] Failed to sign a download URL:', getSafeErrorMetadata(error));
+      throw new MCPAttachmentError('url_unavailable', ref);
+    }
+    if (!result.ok) {
+      throw new MCPAttachmentError('unsupported_source', ref);
+    }
+    const minTtlMs = Math.min(config.minTtl ?? DEFAULT_MIN_TTL_SECONDS, expiresIn) * 1000;
+    if (result.value.expiresAt.getTime() - this.#now() < minTtlMs) {
+      throw new MCPAttachmentError('insufficient_ttl', ref);
+    }
+    return result.value.url;
+  }
+}
+
+/**
+ * Builds the turn's references, or `undefined` when no file can be handed to a tool. Lists the
+ * files the user attached to this message, then files from earlier messages of the conversation
+ * (most recent first, at most `MAX_MCP_ATTACHMENT_CONVERSATION_FILES`). Every listed file is owned
+ * by the acting user in their tenant and stored where a download URL can be signed; which ones a
+ * given server is offered is decided per server by `MCPAttachmentRefs.accepted`.
+ */
+export function createMCPAttachmentRefs(
+  params: MCPAttachmentRefsParams,
+): MCPAttachmentRefs | undefined {
+  const requestFileIds = new Set(params.requestFileIds);
+  const seen = new Set<string>();
+  const entries: AttachmentEntry[] = [];
+
+  const isEligible = (file: AttachmentFile | null | undefined): file is AttachmentFile =>
+    !!file?.file_id &&
+    !seen.has(file.file_id) &&
+    file.user != null &&
+    String(file.user) === params.owner.userId &&
+    (file.tenantId ?? null) === (params.owner.tenantId ?? null) &&
+    !!file.source &&
+    supportsDownloadURL(file.source, params.getStrategyFunctions);
+
+  const add = (file: AttachmentFile, earlier: boolean): void => {
+    seen.add(file.file_id);
+    entries.push({
+      ref: referenceFor(file, params.owner.userId),
+      file,
+      filename: displayName(file.filename),
+      type: (file.type || 'application/octet-stream').toLowerCase(),
+      earlier,
+    });
+  };
+
+  for (const file of params.files) {
+    if (file && requestFileIds.has(file.file_id) && isEligible(file)) {
+      add(file, false);
+    }
+  }
+
+  const earlierFiles = [...(params.conversationFiles ?? [])]
+    .filter((file): file is AttachmentFile => file != null)
+    .sort(byRecency);
+  const earlierLimit = entries.length + MAX_MCP_ATTACHMENT_CONVERSATION_FILES;
+  for (const file of earlierFiles) {
+    if (entries.length >= earlierLimit) {
+      break;
+    }
+    if (isEligible(file)) {
+      add(file, true);
+    }
+  }
+
+  return entries.length > 0 ? new MCPAttachmentRefs(entries, params) : undefined;
+}
+
+type Mapper = (value: string) => string;
+
+/**
+ * Copies plain JSON containers at any depth, mapping strings; anything else is returned as is.
+ * Arguments and results are parsed JSON, so they hold no cycles, and a scrub must not skip a level.
+ */
+function mapStrings(value: unknown, map: Mapper): unknown {
+  if (typeof value === 'string') {
+    return map(value);
+  }
+  if (value == null || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => mapStrings(item, map));
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return value;
+  }
+  const copy: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = mapStrings(item, map);
+  }
+  return copy;
+}
+
+/**
+ * The reference a model-sent string names. Models sometimes copy the whole list line, so a leading
+ * reference followed by `:` or whitespace counts; anything else is looked up as written.
+ */
+function normalizeRef(value: string): string {
+  return LEADING_REF.exec(value)?.[0] ?? value;
+}
+
+/** Every spelling of a minted URL a server might echo: as is, JSON-escaped, or its query alone. */
+function urlSpellings(url: string): string[] {
+  const spellings = [url, url.replace(/\//g, '\\/')];
+  const queryIndex = url.indexOf('?');
+  if (queryIndex !== -1 && queryIndex < url.length - 1) {
+    spellings.push(url.slice(queryIndex));
+  }
+  return spellings;
+}
+
+export interface MCPAttachmentCallParams<T> {
+  /** Read from the run's `configurable`; anything but a live instance counts as no references. */
+  refs: unknown;
+  serverConfig: { attachmentUrls?: MCPAttachmentURLs } | null | undefined;
+  toolArguments: unknown;
+  call: (toolArguments: unknown) => Promise<T>;
+}
+
+/**
+ * Runs an MCP tool call with this turn's attachment references swapped for freshly signed URLs.
+ * Only servers with `attachmentUrls` get URLs; for others the arguments pass through unchanged.
+ * The caller's arguments are not mutated, so stored and streamed tool calls keep the reference,
+ * and any minted URL the server echoes back, in the result or in a thrown error's message, is
+ * replaced with its reference. A result marked as a tool error stays marked on the scrubbed copy.
+ */
+export async function callWithMCPAttachments<T>({
+  refs,
+  serverConfig,
+  toolArguments,
+  call,
+}: MCPAttachmentCallParams<T>): Promise<T> {
+  const config = serverConfig?.attachmentUrls;
+  if (!config) {
+    return call(toolArguments);
+  }
+  const requested = new Set<string>();
+  mapStrings(toolArguments, (value) => {
+    if (value.startsWith(REF_SCHEME)) {
+      requested.add(value);
+    }
+    return value;
+  });
+  if (requested.size === 0) {
+    return call(toolArguments);
+  }
+  if (!(refs instanceof MCPAttachmentRefs)) {
+    throw new MCPAttachmentError('unknown_reference', [...requested][0]);
+  }
+  const turnRefs = refs;
+  /** One URL per reference, however many spellings of it the model sent; keyed by the string sent. */
+  const urls = new Map<string, Promise<string>>();
+  const minted = new Map(
+    await Promise.all(
+      [...requested].map(async (sent) => {
+        const ref = normalizeRef(sent);
+        const url = urls.get(ref) ?? turnRefs.mint(ref, config);
+        urls.set(ref, url);
+        return [sent, await url] as const;
+      }),
+    ),
+  );
+  const replacements = [...minted].flatMap(([sent, url]) =>
+    urlSpellings(url).map((spelling) => [spelling, normalizeRef(sent)] as const),
+  );
+  const scrub = (value: string): string =>
+    replacements.reduce(
+      (text, [spelling, ref]) => (text.includes(spelling) ? text.split(spelling).join(ref) : text),
+      value,
+    );
+
+  let result: T;
+  try {
+    result = await call(mapStrings(toolArguments, (value) => minted.get(value) ?? value));
+  } catch (error) {
+    /** The tool wrapper hands `error.message` to the model. */
+    if (error instanceof Error) {
+      error.message = scrub(error.message);
+    }
+    throw error;
+  }
+  const scrubbed = mapStrings(result, scrub) as T;
+  /** Error status is tracked by object identity, so the copy has to be marked again. */
+  if (typeof result === 'object' && result !== null && isMCPToolResultError(result)) {
+    return markMCPToolResultError(scrubbed as T & object, true);
+  }
+  return scrubbed;
+}
